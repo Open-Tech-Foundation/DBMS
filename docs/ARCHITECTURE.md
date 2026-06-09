@@ -33,6 +33,8 @@ Strict bottom-up layering — each layer depends only on layers below it.
 ├────────────────────────────────────────────────────────────────┤
 │  pager — file I/O, fixed pages, page cache, meta pages, freelist,│
 │          per-page checksums                                      │
+├────────────────────────────────────────────────────────────────┤
+│  common — error taxonomy; injectable clock / RNG / IO backends   │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -57,8 +59,9 @@ A Cargo workspace; crate boundaries enforce the layering and keep each test surf
 | `index` | Secondary B+tree index maintenance, kept atomic with base-row writes. |
 | `proto` | AST types for both surfaces; the logical-plan IR; hardened MessagePack decode; result encode. |
 | `query` | Surface→IR lowering, validator, rule-based planner, pull-based executor operators, write path + safety enforcement, EXPLAIN. |
-| `core` | The public embedded API tying everything together; cursor lifetime management. |
-| `cli` | REPL + scenario runner + concurrency playground (see `PLAN.md`). |
+| `otf-dbms` | The public embedded API tying everything together; cursor lifetime management. (The org-namespaced public crate; was `core` in earlier drafts — renamed to avoid the std `core` collision. Imported in code as `otf_dbms`.) |
+| `cli` | REPL + scenario runner + concurrency playground (see `PLAN.md`); ships the `otf-dbms` binary. |
+| `common` | **(11th crate, bottom of the stack.)** Cross-cutting foundations shared by every layer: the `SPEC.md` §9 `ErrorCategory` taxonomy + a `CategorizedError` trait each crate implements, and the injectable `Clock` / `Rng` / `IoBackend` host services with real-file, in-memory, and fault-injecting backends. Deliberately tight — domain newtypes (`PageId`, `TxnId`, `Value`, …) stay in their owning crates. See `DECISIONS.md` (D1). |
 
 Supporting trees: `fuzz/` (cargo-fuzz targets), `benches/` (criterion), `tests/` (cross-crate
 integration + acceptance).

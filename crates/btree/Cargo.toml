@@ -1,0 +1,18 @@
+[package]
+name = "btree"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Copy-on-write B+tree over the pager (Phase 3)."
+
+[dependencies]
+common.workspace = true
+pager.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

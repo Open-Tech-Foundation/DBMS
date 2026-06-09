@@ -1,0 +1,19 @@
+[package]
+name = "txn"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Single-writer transactions, MVCC snapshots, commit/group-commit, recovery (Phase 4)."
+
+[dependencies]
+common.workspace = true
+pager.workspace = true
+btree.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

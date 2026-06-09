@@ -1,0 +1,5 @@
+# Operating rule 3 forbids unwrap/expect/panic in *library* paths only.
+# Test code may use them freely; these knobs scope the workspace lints
+# (set in Cargo.toml) to non-test code.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

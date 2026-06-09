@@ -1,0 +1,16 @@
+[package]
+name = "common"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Cross-cutting foundations: error taxonomy and injectable host services (clock, RNG, I/O backends)."
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true

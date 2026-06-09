@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.95"
+license = "Apache-2.0"
+authors = ["Open Tech Foundation and its contributors"]
+repository = "https://github.com/opentf/DBMS"
+publish = false
+
+[workspace.dependencies]
+# Internal crates (path deps); versions track the workspace version.
+common = { path = "crates/common" }
+pager = { path = "crates/pager" }
+btree = { path = "crates/btree" }
+txn = { path = "crates/txn" }
+types = { path = "crates/types" }
+catalog = { path = "crates/catalog" }
+index = { path = "crates/index" }
+proto = { path = "crates/proto" }
+query = { path = "crates/query" }
+otf-dbms = { path = "crates/dbms" }
+
+# External, vetted dependencies.
+thiserror = "2"
+
+# Operating rule 3: no unwrap/expect/panic in library paths. Enforced
+# mechanically here; clippy.toml relaxes these inside test code only.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

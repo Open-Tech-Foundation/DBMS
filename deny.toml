@@ -1,0 +1,28 @@
+# cargo-deny configuration (PLAN.md §2 CI gate): licenses + advisories + bans.
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# Permissive licenses compatible with the workspace's Apache-2.0 license.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "Unicode-3.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Surface accidental duplicate/risky dependencies; tighten as the tree grows.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

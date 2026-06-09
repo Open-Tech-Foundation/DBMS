@@ -1,0 +1,20 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "REPL, scenario runner, and concurrency playground (Phase 11)."
+
+[[bin]]
+name = "otf-dbms"
+path = "src/main.rs"
+
+[dependencies]
+otf-dbms.workspace = true
+
+[lints]
+workspace = true
