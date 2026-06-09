@@ -8,6 +8,31 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 
 ## [Unreleased]
 
+### Phase 2 — Pager (paged, checksummed, atomically-committing storage)
+
+#### Added
+- `pager`: fixed 4 KiB page frames with a self-describing 16-byte header
+  (CRC32C, page type, self-id) that detects truncation, bit-rot, and misdirected
+  writes; a decoder that returns typed `Corruption` errors and never panics on
+  hostile input.
+- In-house software CRC32C (Castagnoli), zero-dependency (`DECISIONS.md` D3).
+- Double-buffered meta pages (slots 0/1) with an atomic commit: dirty pages →
+  fsync → new meta to the inactive slot → fsync → promote. Reopen adopts the
+  valid meta slot with the highest committed txn id.
+- SQLite-style free-list trunk chain (`alloc`/`free`) reusing freed pages before
+  extending the file; `validate()` walks meta + free-list proving range, no
+  cycles/duplicates, and length agreement.
+- Byte-budgeted LRU page cache (dirty pages pinned until commit).
+- Exit-criteria tests: a seeded model-based alloc/free/read/write property test
+  across commits/reopens (`DECISIONS.md` D4), a multi-trunk reuse test, an
+  injected-fault crash test around the meta swap (reopen lands on the last whole
+  commit, never a torn one), and decoder/meta-recovery robustness tests.
+
+#### Changed
+- `crates/common/src/io.rs`: `FaultInjectingBackend::reset_counters` (target a
+  fault at a specific later operation) and an `IoBackend` impl for `Arc<B>` (a
+  test can hold a handle to arm faults while the `Pager` owns the backend).
+
 ### Phase 1 — Foundations & scaffolding
 
 #### Added

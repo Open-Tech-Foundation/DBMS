@@ -13,5 +13,8 @@ description = "Fixed-size paged file I/O: checksums, page cache, meta pages, fre
 common.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+common.workspace = true
+
 [lints]
 workspace = true

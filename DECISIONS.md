@@ -5,6 +5,41 @@ Per `PLAN.md` §1 rule 6, every resolution of an ambiguity or deviation from
 
 ---
 
+## D4 — Seeded, model-based property tests instead of `proptest`
+
+**Phase:** 2 · **Status:** accepted
+
+`PLAN.md` §3.6 calls for randomized, reproducible-from-a-seed property tests.
+The obvious tool is the `proptest` crate, but it (and its transitive
+dependencies) would be the first third-party code to enter the dependency graph,
+and the CI gate `cargo deny` (licenses/advisories) is **CI-only** — not
+installed locally — so a new dependency's license/advisory status cannot be
+vetted before pushing.
+
+**Decision:** write property tests in-house against the `common::SeededRng`
+(SplitMix64) host service already built in Phase 1. A test fixes a seed, drives a
+randomized op sequence (alloc/free/write/commit/reopen) against the pager while a
+simple in-memory model (`HashMap<page, tag>`) tracks expected contents, and
+asserts the two agree plus `validate()` passes. Seeds are listed explicitly so a
+failure is reproducible. This keeps the dependency graph empty of unvetted crates
+while satisfying §3.6. Revisit if shrinking (minimal counterexamples) becomes
+worth a dependency.
+
+## D3 — In-house software CRC32C (Castagnoli), no dependency
+
+**Phase:** 2 · **Status:** accepted
+
+`ARCHITECTURE.md` specifies a CRC32C per-page checksum. Crates such as `crc32c`
+or `crc` would pull in third-party code that, per D4's reasoning, cannot be
+license/advisory-vetted locally (the `cargo deny` gate is CI-only).
+
+**Decision:** implement CRC32C (Castagnoli polynomial `0x82F63B78`) in `pager`
+as a small, table-driven software routine (`crc::crc32c`), with the lookup table
+built by a `const fn` at compile time. Correctness is pinned by the standard
+check vector (`crc32c(b"123456789") == 0xE3069283`). No hardware-intrinsic
+(SSE4.2) path for now — portability and a zero-dependency graph over peak
+throughput; revisit if checksum cost shows up in profiling.
+
 ## D2 — Public crate is `otf-dbms`; internal crates keep functional names
 
 **Phase:** 1 · **Status:** accepted

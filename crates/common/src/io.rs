@@ -259,6 +259,15 @@ impl<B: IoBackend> FaultInjectingBackend<B> {
         *self.armed.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 
+    /// Reset all per-operation occurrence counters to zero, so a subsequent
+    /// [`arm`](Self::arm) targets operations relative to this point. Useful for
+    /// faulting a specific operation within a later phase of a workload.
+    pub fn reset_counters(&self) {
+        self.reads.store(0, Ordering::Relaxed);
+        self.writes.store(0, Ordering::Relaxed);
+        self.syncs.store(0, Ordering::Relaxed);
+    }
+
     /// Consume the wrapper and return the inner backend.
     pub fn into_inner(self) -> B {
         self.inner
@@ -306,6 +315,31 @@ impl<B: IoBackend> IoBackend for FaultInjectingBackend<B> {
 
     fn truncate(&self, len: u64) -> IoResult<()> {
         self.inner.truncate(len)
+    }
+}
+
+/// Sharing an [`IoBackend`] behind an [`Arc`](std::sync::Arc) keeps it an
+/// `IoBackend`. This lets a test retain a handle (e.g. to arm faults) while a
+/// `Pager` owns another clone of the same backend.
+impl<B: IoBackend + ?Sized> IoBackend for std::sync::Arc<B> {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> IoResult<()> {
+        (**self).read_at(offset, buf)
+    }
+
+    fn write_at(&self, offset: u64, data: &[u8]) -> IoResult<()> {
+        (**self).write_at(offset, data)
+    }
+
+    fn sync(&self) -> IoResult<()> {
+        (**self).sync()
+    }
+
+    fn len(&self) -> IoResult<u64> {
+        (**self).len()
+    }
+
+    fn truncate(&self, len: u64) -> IoResult<()> {
+        (**self).truncate(len)
     }
 }
 
