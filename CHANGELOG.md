@@ -8,6 +8,28 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 
 ## [Unreleased]
 
+### Phase 3 — Copy-on-write B+tree
+
+#### Added
+- `btree`: the copy-on-write ordered map over the pager — point lookup,
+  insert/delete with node split/merge, and forward/backward range scans. A
+  mutation copies the touched path to a **new root** and returns the superseded
+  pages (`Edit::freed`) for the `txn` layer to reclaim; the tree never frees a
+  page, so an earlier root stays a valid snapshot (`DECISIONS.md` D7).
+- Variable-length slotted leaf/internal nodes, one per `Data` page, with a
+  bounds-checked decoder that rejects hostile bytes as typed `Corruption` errors
+  and never panics; byte-based fill with split / merge / rotate, single entries
+  capped at half a page (`EntryTooLarge` otherwise) (`DECISIONS.md` D5).
+- `Cursor`: a lazy, bounded, forward/backward range iterator that walks a
+  root-to-leaf stack — no leaf sibling pointers, so edits stay O(log n) and old
+  roots stay readable (`DECISIONS.md` D6).
+- `BTree::validate` proving balanced depth, ordering consistent with separators,
+  and non-empty non-root nodes.
+- Exit-criteria tests: a seeded model-based property test against
+  `std::collections::BTreeMap` (insert/delete/lookup/range, `validate` after
+  every step, commit + reopen), a snapshot-isolation test (an old root sees no
+  later writes), and node-decoder robustness/fuzz tests.
+
 ### Phase 2 — Pager (paged, checksummed, atomically-committing storage)
 
 #### Added

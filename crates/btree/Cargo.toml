@@ -14,5 +14,9 @@ common.workspace = true
 pager.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+common.workspace = true
+pager.workspace = true
+
 [lints]
 workspace = true

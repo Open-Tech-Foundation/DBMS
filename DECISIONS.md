@@ -5,6 +5,59 @@ Per `PLAN.md` §1 rule 6, every resolution of an ambiguity or deviation from
 
 ---
 
+## D7 — B+tree mutations report superseded pages; the tree never frees
+
+**Phase:** 3 · **Status:** accepted
+
+`ARCHITECTURE.md` §3.2 says a modification "copies the touched path to a new
+root" and "the `txn` layer installs it on commit", and §3.3 ties page
+reclamation to live snapshots. That leaves open *who frees the old path*.
+
+**Decision:** the B+tree is a pure transformation over pager pages and **never
+frees a page itself**. `insert`/`delete` return an `Edit { new_root, freed }`,
+where `freed` lists the old copied-path (and merged-sibling) pages. The
+caller decides when to reclaim them — in Phase 4 the `txn` layer frees a page
+only once no live snapshot needs it; that is exactly what keeps an earlier root a
+valid, immutable snapshot. Phase-3 tests free eagerly when no snapshot is pinned
+(to bound file growth) and skip freeing for the snapshot-isolation test.
+
+## D6 — No leaf sibling pointers; range scans use a root-to-leaf cursor stack
+
+**Phase:** 3 · **Status:** accepted
+
+A classic B+tree links leaves for fast range scans. Under copy-on-write that is
+costly: editing a leaf would force copying its linked neighbours (to update their
+pointers), turning an O(log n) path copy into O(n) fan-out.
+
+**Decision:** store **no sibling pointers**. A `Cursor` holds the descent path
+(a stack of node + index) and advances by walking the stack — O(log
+n) to cross a leaf boundary, both forward and backward. The cursor reads a fixed
+root, so it is a stable snapshot for its whole life. This also makes nodes purely
+parent-referenced, which is what lets an old root stay valid (see D7).
+
+## D5 — Variable-length slotted nodes, byte-fill split/merge, provisional raw keys
+
+**Phase:** 3 · **Status:** accepted
+
+`ARCHITECTURE.md` §3.2 mandates an order-preserving key encoding (delivered by
+`types` in Phase 5) and node split/merge, but not a concrete node layout.
+
+**Decision:**
+- **Node layout:** one node per `Data` page; a kind byte distinguishes leaf vs
+  internal in the payload. Keys/values are variable length, so fill is measured
+  in **bytes**: a node splits when an entry won't fit and is rebalanced (merge,
+  or merge-then-split) when it drops below ¼-page. Each cell is capped at half a
+  page (`MAX_CELL`) so any two cells share a page — guaranteeing a split always
+  yields two non-empty halves and an internal node always holds ≥2 children. A
+  single entry over the cap is a typed `EntryTooLarge` error; v1 has no overflow
+  pages (deferred).
+- **Decode-whole/encode-whole:** because CoW rewrites a whole node on every edit,
+  nodes are decoded to an in-memory form and re-encoded rather than edited
+  in-place — simpler and the cost is dwarfed by the page write.
+- **Provisional keys:** keys are compared **bytewise** (raw `&[u8]`). PLAN §3
+  calls for this provisional scheme; the Phase-5 order-preserving encoding will
+  produce byte strings that compare identically, so the tree is unaffected.
+
 ## D4 — Seeded, model-based property tests instead of `proptest`
 
 **Phase:** 2 · **Status:** accepted
