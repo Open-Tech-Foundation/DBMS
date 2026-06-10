@@ -89,15 +89,8 @@ impl<'p, B: IoBackend> BTree<'p, B> {
 
     /// Insert or replace `key` → `value`, returning the new root and freed pages.
     pub fn insert(&self, root: PageId, key: &[u8], value: &[u8]) -> Result<Edit> {
-        // Reject entries that could never fit a node (as a leaf cell now, or as
-        // an internal separator later). v1 has no overflow pages.
-        let need = (4 + key.len() + value.len()).max(10 + key.len());
-        if need > MAX_CELL {
-            return Err(BTreeError::EntryTooLarge {
-                entry: need,
-                max: MAX_CELL,
-            });
-        }
+        // Reject entries that could never fit a node (v1 has no overflow pages).
+        check_entry(key, value)?;
 
         let mut freed = Vec::new();
         let new_root = match self.insert_rec(root, key, value, &mut freed)? {
@@ -401,4 +394,21 @@ impl<'p, B: IoBackend> BTree<'p, B> {
 /// separator `keys`.
 fn route_index(keys: &[Vec<u8>], key: &[u8]) -> usize {
     keys.partition_point(|k| k.as_slice() <= key)
+}
+
+/// Check whether a `key`/`value` entry can ever fit in a node, without touching
+/// the tree. Lets a caller (e.g. the `txn` layer) validate a whole transaction
+/// before applying any of it. Returns [`BTreeError::EntryTooLarge`] otherwise.
+pub fn check_entry(key: &[u8], value: &[u8]) -> Result<()> {
+    // The entry must fit both as a leaf cell now and as an internal separator
+    // (its key alone) later.
+    let need = (4 + key.len() + value.len()).max(10 + key.len());
+    if need > MAX_CELL {
+        Err(BTreeError::EntryTooLarge {
+            entry: need,
+            max: MAX_CELL,
+        })
+    } else {
+        Ok(())
+    }
 }

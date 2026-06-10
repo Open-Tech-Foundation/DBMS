@@ -15,5 +15,15 @@ pager.workspace = true
 btree.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+common.workspace = true
+pager.workspace = true
+
+# `loom` models the writer/snapshot handoff. It is only compiled under
+# `--cfg loom` (never in normal builds, tests, or CI gates), keeping it out of
+# the shipped dependency graph.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
 [lints]
 workspace = true

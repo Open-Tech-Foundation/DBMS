@@ -33,3 +33,8 @@ thiserror = "2"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+
+[workspace.lints.rust]
+# `loom` (txn's concurrency model checker) is only built under `--cfg loom`;
+# register the cfg so normal builds don't warn about it as unexpected.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

@@ -8,6 +8,38 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 
 ## [Unreleased]
 
+### Phase 4 — Transactions, MVCC & durability
+
+#### Added
+- `txn`: the embedded database handle — `Db` (create/open/clone), atomic
+  multi-op `write` (plus `put`/`delete` helpers), and pinned, consistent read
+  `Snapshot`s (`get`/`range`/`scan`).
+- A single writer thread owning the pager: drains the write queue, coalesces
+  waiting transactions into one **group commit** (one fsync pair for the whole
+  batch), and publishes the new version on success.
+- **Validate-then-apply** atomicity: every op is checked before any mutation,
+  so a transaction is applied whole or rejected whole; post-validation I/O
+  errors are fatal — the writer fans out `WriterStopped` and stops, leaving the
+  database readable but unwritable (`DECISIONS.md` D8).
+- `Registry`: reference-counted snapshot versions and the **reclamation
+  watermark** — a page superseded by commit `T` is returned to the allocator
+  only once no live snapshot older than `T` remains.
+- A `loom` model check of the registry handoff proving a pinned reader can
+  never observe its pages reclaimed, over every interleaving; gated behind
+  `--cfg loom` so it never enters normal builds (`DECISIONS.md` D9).
+- Exit-criteria tests: crash-at-every-fsync-boundary durability (acknowledged
+  commits always recover; interrupted ones land whole or not at all), a
+  long-pinned reader keeping its exact view across heavy churn while
+  reclamation defers then catches up, and a seeded deterministic simulation of
+  interleaved writes and snapshot open/close matched against a model.
+
+#### Changed
+- `pager`: `commit()` no longer holds the state lock across fsyncs — readers
+  proceed during the data/meta syncs; safe under the single-writer regime
+  (`DECISIONS.md` D10).
+- `btree`: entry-size validation extracted as `check_entry` so the `txn` layer
+  can pre-validate transactions before mutating.
+
 ### Phase 3 — Copy-on-write B+tree
 
 #### Added

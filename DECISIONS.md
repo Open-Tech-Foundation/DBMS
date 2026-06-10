@@ -5,6 +5,53 @@ Per `PLAN.md` §1 rule 6, every resolution of an ambiguity or deviation from
 
 ---
 
+## D10 — Pager commit releases the state lock across fsyncs
+
+**Phase:** 4 · **Status:** accepted
+
+`Pager::commit` originally held the pager's state lock for the whole commit,
+so a reader hitting an uncached page would block behind both fsyncs —
+defeating `ARCHITECTURE.md` §3.3's "readers never block on the writer".
+
+**Decision:** commit runs in three phases: snapshot the dirty set and next
+meta **under the lock**, write + fsync data and the inactive meta slot **with
+the lock released**, then install the new meta and flip the active slot
+**under the lock again**. Sound because the layer above guarantees a single
+writer (the `txn` writer thread): no second commit can interleave, and CoW
+means in-flight readers only touch pages the commit never modifies.
+
+## D9 — `loom` as a test-only dependency gated behind `--cfg loom`
+
+**Phase:** 4 · **Status:** accepted
+
+The writer/reader snapshot handoff (pin, release, publish, watermark) is the
+one concurrency-critical protocol in the system; sampled tests cannot prove it.
+D4 keeps unvetted dependencies out of the shipped graph.
+
+**Decision:** model-check the `Registry` with `loom`, declared under
+`[target.'cfg(loom)'.dependencies]` so it is compiled **only** when
+`RUSTFLAGS="--cfg loom"` is set — never in normal builds, tests, or CI gates.
+The registry swaps in `loom::sync::Mutex` under that cfg; the model proves a
+pinned reader can never observe its pages reclaimed, over every interleaving.
+Run: `RUSTFLAGS="--cfg loom" cargo test -p txn --test loom_registry --release`.
+
+## D8 — Transactions are validated before any mutation (validate-then-apply)
+
+**Phase:** 4 · **Status:** accepted
+
+`SPEC.md` requires transactions to be atomic, but a multi-op transaction whose
+third op fails after two applied would need rollback — and the CoW tree has no
+undo log.
+
+**Decision:** the writer pre-validates every op (`btree::check_entry`) before
+mutating anything; a validation failure rejects the **whole** transaction as a
+no-op. After validation, the only remaining failures are I/O errors, which are
+**fatal**: the writer aborts the uncommitted batch (nothing was durable), fans
+`WriterStopped` out to every queued reply, and stops — the database stays
+readable but is no longer writable. No partial transaction can ever commit.
+An acknowledged commit is durable; a commit interrupted at the final meta
+fsync may land either way (inherent fsync ambiguity) but never partially.
+
 ## D7 — B+tree mutations report superseded pages; the tree never frees
 
 **Phase:** 3 · **Status:** accepted

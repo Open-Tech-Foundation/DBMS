@@ -177,26 +177,33 @@ impl<B: IoBackend> Pager<B> {
 
     /// Flush staged changes durably and atomically: write dirty pages → fsync →
     /// write the new meta to the inactive slot → fsync → promote.
+    ///
+    /// The state lock is held only to snapshot the work and to promote the
+    /// result — **never across the fsyncs** — so concurrent readers are not
+    /// blocked during the durability window. This assumes a single writer (the
+    /// `txn` layer serializes commits); concurrent commits are not supported.
     pub fn commit(&self) -> Result<()> {
-        let mut st = self.locked();
+        // 1. Under the lock, snapshot what to flush and the meta to install.
+        let (dirty, meta, inactive, needed) = {
+            let st = self.locked();
+            let needed = st.meta.page_count * PAGE_SIZE as u64;
+            let dirty = st.cache.dirty_pages();
+            let inactive = 1 - st.active_slot;
+            let mut meta = st.meta.clone();
+            meta.txn_id += 1;
+            (dirty, meta, inactive, needed)
+        };
 
-        // Ensure the file covers every accounted page before writing into it.
-        let needed = st.meta.page_count * PAGE_SIZE as u64;
+        // 2. Durable I/O with the lock released. Data pages → fsync → new meta
+        //    to the inactive slot → fsync (the durability point).
         if self.backend.len()? < needed {
             self.backend.truncate(needed)?;
         }
-
-        // 1. Data pages → backend, then fsync.
-        let dirty = st.cache.dirty_pages();
         for (id, frame) in &dirty {
             self.backend.write_at(id * PAGE_SIZE as u64, &frame[..])?;
         }
         self.backend.sync()?;
 
-        // 2. New meta → inactive slot, then fsync (the durability point).
-        let inactive = 1 - st.active_slot;
-        let mut meta = st.meta.clone();
-        meta.txn_id += 1;
         let mut frame = page::zeroed();
         meta.encode(&mut frame);
         page::finalize(&mut frame, PageType::Meta, PageId::new(inactive));
@@ -204,11 +211,14 @@ impl<B: IoBackend> Pager<B> {
             .write_at(inactive * PAGE_SIZE as u64, &frame[..])?;
         self.backend.sync()?;
 
-        // 3. Promote: only now is the commit visible.
-        st.cache.clear_dirty();
-        st.meta = meta;
-        st.active_slot = inactive;
-        self.txn_id.store(st.meta.txn_id, Ordering::Release);
+        // 3. Promote under the lock: only now is the commit visible.
+        {
+            let mut st = self.locked();
+            st.cache.clear_dirty();
+            st.meta = meta;
+            st.active_slot = inactive;
+            self.txn_id.store(st.meta.txn_id, Ordering::Release);
+        }
         Ok(())
     }
 

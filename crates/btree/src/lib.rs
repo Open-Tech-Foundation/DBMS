@@ -33,7 +33,7 @@ use common::{CategorizedError, ErrorCategory};
 use pager::CorruptionKind;
 
 pub use cursor::{Cursor, Direction};
-pub use tree::{BTree, Edit, TreeStats};
+pub use tree::{check_entry, BTree, Edit, TreeStats};
 
 /// Errors raised by the B+tree.
 #[derive(Debug, thiserror::Error)]
