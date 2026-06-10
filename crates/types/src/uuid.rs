@@ -8,7 +8,7 @@
 //! backward (a counter in `rand_a` carries the order; on overflow the
 //! timestamp is nudged forward).
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use common::{Clock, Rng};
 
@@ -16,16 +16,19 @@ use crate::{Result, TypeError};
 
 /// Layout: 48-bit unix-ms timestamp | 4-bit version (7) | 12-bit `rand_a`
 /// (used as a monotonicity counter) | 2-bit variant (0b10) | 62-bit `rand_b`.
-pub struct UuidV7Gen<'a> {
-    clock: &'a dyn Clock,
-    rng: &'a dyn Rng,
+///
+/// Owns its (shared) host services so it can live as long as the engine —
+/// the monotonicity state must span transactions, not one borrow.
+pub struct UuidV7Gen {
+    clock: Arc<dyn Clock>,
+    rng: Arc<dyn Rng>,
     /// The last issued `(unix_ms, counter)` pair, strictly increasing.
     last: Mutex<(u64, u16)>,
 }
 
-impl<'a> UuidV7Gen<'a> {
+impl UuidV7Gen {
     /// Create a generator over the injected host services.
-    pub fn new(clock: &'a dyn Clock, rng: &'a dyn Rng) -> Self {
+    pub fn new(clock: Arc<dyn Clock>, rng: Arc<dyn Rng>) -> Self {
         UuidV7Gen {
             clock,
             rng,

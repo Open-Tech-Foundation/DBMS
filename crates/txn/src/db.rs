@@ -8,40 +8,47 @@ use btree::BTree;
 use common::IoBackend;
 use pager::{PageId, Pager};
 
+use crate::job::{OpsJob, WriteJob};
 use crate::registry::Registry;
 use crate::writer::{Request, Writer};
 use crate::{Op, Result, TxnError};
 
-/// State shared between every [`Db`] clone and the writer thread.
-struct Shared<B: IoBackend> {
+/// State shared between every [`JobDb`] clone and the writer thread.
+struct Shared<B: IoBackend, J: WriteJob<B>> {
     pager: Arc<Pager<B>>,
     registry: Arc<Registry>,
     /// The write queue's sending half; `None` once the handle is shutting down.
-    sender: Mutex<Option<Sender<Request>>>,
+    sender: Mutex<Option<Sender<Request<B, J>>>>,
     /// The writer thread, joined on shutdown.
     join: Mutex<Option<JoinHandle<()>>>,
 }
 
-/// An embedded database handle.
+/// An embedded database handle whose write transactions are jobs of type `J`.
 ///
-/// Cheap to [`clone`](Clone) — every clone shares one writer thread and one page
-/// store. Writes are serialized through the writer (and batched into group
-/// commits); reads run concurrently against pinned [`Snapshot`]s.
-pub struct Db<B: IoBackend> {
-    shared: Arc<Shared<B>>,
+/// Cheap to [`clone`](Clone) — every clone shares one writer thread and one
+/// page store. Writes are serialized through the writer (and batched into
+/// group commits); reads run concurrently against pinned [`Snapshot`]s.
+///
+/// For the plain key/value form see [`Db`]; higher layers (the catalog)
+/// instantiate their own job type.
+pub struct JobDb<B: IoBackend, J: WriteJob<B>> {
+    shared: Arc<Shared<B, J>>,
 }
 
-impl<B: IoBackend> Clone for Db<B> {
+/// The plain key/value database: a [`JobDb`] running [`OpsJob`]s.
+pub type Db<B> = JobDb<B, OpsJob>;
+
+impl<B: IoBackend, J: WriteJob<B>> Clone for JobDb<B, J> {
     fn clone(&self) -> Self {
-        Db {
+        JobDb {
             shared: Arc::clone(&self.shared),
         }
     }
 }
 
-impl<B: IoBackend + 'static> Db<B> {
-    /// Create a fresh database on an empty backend (initializes an empty data
-    /// tree and commits it as transaction 1).
+impl<B: IoBackend + 'static, J: WriteJob<B>> JobDb<B, J> {
+    /// Create a fresh database on an empty backend (initializes an empty
+    /// root tree and commits it as transaction 1).
     pub fn create(backend: B) -> Result<Self> {
         let pager = Pager::create(backend)?;
         let root = BTree::new(&pager).create()?;
@@ -57,7 +64,7 @@ impl<B: IoBackend + 'static> Db<B> {
         let (root, txn_id) = match pager.catalog_root() {
             Some(root) => (root, pager.txn_id()),
             None => {
-                // A pager made outside this layer has no data tree yet; seed one.
+                // A pager made outside this layer has no root tree yet; seed one.
                 let root = BTree::new(&pager).create()?;
                 pager.set_catalog_root(Some(root));
                 pager.commit()?;
@@ -70,10 +77,10 @@ impl<B: IoBackend + 'static> Db<B> {
     fn spawn(pager: Pager<B>, root: PageId, txn_id: u64) -> Self {
         let pager = Arc::new(pager);
         let registry = Arc::new(Registry::new(Some(root), txn_id));
-        let (sender, rx) = channel::<Request>();
+        let (sender, rx) = channel::<Request<B, J>>();
         let writer = Writer::new(Arc::clone(&pager), Arc::clone(&registry), root);
         let join = std::thread::spawn(move || writer.run(rx));
-        Db {
+        JobDb {
             shared: Arc::new(Shared {
                 pager,
                 registry,
@@ -83,12 +90,11 @@ impl<B: IoBackend + 'static> Db<B> {
         }
     }
 
-    /// Apply a transaction (a sequence of [`Op`]s) atomically and durably,
-    /// returning the committed transaction id. Blocks until the writer has made
-    /// it durable.
-    pub fn write(&self, ops: Vec<Op>) -> Result<u64> {
-        let (resp, reply) = channel::<Result<u64>>();
-        let req = Request { ops, resp };
+    /// Submit a write transaction and block until it is durable, returning
+    /// the committed txn id and the job's output.
+    pub fn submit(&self, job: J) -> Result<(u64, J::Out)> {
+        let (resp, reply) = channel::<Result<(u64, J::Out)>>();
+        let req = Request { job, resp };
         {
             let guard = lock(&self.shared.sender);
             match guard.as_ref() {
@@ -97,16 +103,6 @@ impl<B: IoBackend + 'static> Db<B> {
             }
         }
         reply.recv().map_err(|_| writer_gone())?
-    }
-
-    /// Insert or replace a single key/value.
-    pub fn put(&self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Result<u64> {
-        self.write(vec![Op::Put(key.into(), value.into())])
-    }
-
-    /// Delete a single key.
-    pub fn delete(&self, key: impl Into<Vec<u8>>) -> Result<u64> {
-        self.write(vec![Op::Delete(key.into())])
     }
 
     /// Pin the latest committed state as a consistent read snapshot.
@@ -132,7 +128,26 @@ impl<B: IoBackend + 'static> Db<B> {
     }
 }
 
-impl<B: IoBackend> Drop for Shared<B> {
+impl<B: IoBackend + 'static> Db<B> {
+    /// Apply a transaction (a sequence of [`Op`]s) atomically and durably,
+    /// returning the committed transaction id. Blocks until the writer has
+    /// made it durable.
+    pub fn write(&self, ops: Vec<Op>) -> Result<u64> {
+        self.submit(OpsJob(ops)).map(|(txn, ())| txn)
+    }
+
+    /// Insert or replace a single key/value.
+    pub fn put(&self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Result<u64> {
+        self.write(vec![Op::Put(key.into(), value.into())])
+    }
+
+    /// Delete a single key.
+    pub fn delete(&self, key: impl Into<Vec<u8>>) -> Result<u64> {
+        self.write(vec![Op::Delete(key.into())])
+    }
+}
+
+impl<B: IoBackend, J: WriteJob<B>> Drop for Shared<B, J> {
     fn drop(&mut self) {
         // Closing the sender ends the writer's recv loop; then join it.
         *lock(&self.sender) = None;
@@ -159,27 +174,60 @@ impl<B: IoBackend> Snapshot<B> {
         self.txn_id
     }
 
-    /// Look up a key in this snapshot.
+    /// The published root this snapshot is pinned at (`None` for an empty
+    /// database).
+    pub fn root(&self) -> Option<PageId> {
+        self.root
+    }
+
+    /// Look up a key in the tree at the published root.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         match self.root {
             None => Ok(None),
-            Some(root) => Ok(BTree::new(&*self.pager).lookup(root, key)?),
+            Some(root) => self.get_in(root, key),
         }
     }
 
-    /// Collect `[lo, hi)` (each bound optional) in ascending key order.
+    /// Collect `[lo, hi)` (each bound optional) from the tree at the published
+    /// root, in ascending key order.
     pub fn range(&self, lo: Option<&[u8]>, hi: Option<&[u8]>) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         match self.root {
             None => Ok(Vec::new()),
-            Some(root) => Ok(BTree::new(&*self.pager)
-                .range(root, lo, hi)?
-                .collect_all()?),
+            Some(root) => self.range_in(root, lo, hi),
         }
     }
 
-    /// Collect the whole snapshot in ascending key order.
+    /// Collect the whole tree at the published root in ascending key order.
     pub fn scan(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         self.range(None, None)
+    }
+
+    /// Look up a key in any tree pinned by this snapshot.
+    ///
+    /// `root` must be reachable from the snapshot's published root (e.g. a
+    /// table root read from the pinned catalog) — that is what guarantees its
+    /// pages are protected from reclamation while this snapshot lives.
+    pub fn get_in(&self, root: PageId, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        Ok(BTree::new(&*self.pager).lookup(root, key)?)
+    }
+
+    /// Collect `[lo, hi)` from any tree pinned by this snapshot (see
+    /// [`get_in`](Self::get_in) for the reachability contract).
+    pub fn range_in(
+        &self,
+        root: PageId,
+        lo: Option<&[u8]>,
+        hi: Option<&[u8]>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        Ok(BTree::new(&*self.pager)
+            .range(root, lo, hi)?
+            .collect_all()?)
+    }
+
+    /// Collect the whole tree at `root` (see [`get_in`](Self::get_in) for the
+    /// reachability contract).
+    pub fn scan_in(&self, root: PageId) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.range_in(root, None, None)
     }
 }
 

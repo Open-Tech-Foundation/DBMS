@@ -11,6 +11,8 @@ description = "Schema model, system catalog, DDL, constraint enforcement (Phase 
 
 [dependencies]
 common.workspace = true
+pager.workspace = true
+btree.workspace = true
 types.workspace = true
 txn.workspace = true
 thiserror.workspace = true

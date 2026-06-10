@@ -19,12 +19,14 @@
 //! ```
 
 mod db;
+mod job;
 mod registry;
 mod writer;
 
 use common::{CategorizedError, ErrorCategory};
 
-pub use db::{Db, Snapshot};
+pub use db::{Db, JobDb, Snapshot};
+pub use job::{OpsJob, WriteCtx, WriteJob};
 pub use registry::{Registry, UNBOUNDED};
 
 /// One mutation within a write transaction.
@@ -46,6 +48,12 @@ pub enum TxnError {
     /// An error from the underlying B+tree.
     #[error(transparent)]
     BTree(#[from] btree::BTreeError),
+    /// A write job rejected the transaction before mutating anything — a
+    /// validation or constraint failure raised by a higher layer (e.g. the
+    /// catalog). Carries that layer's typed error; its category is the inner
+    /// error's category.
+    #[error("transaction rejected: {0}")]
+    Rejected(Box<dyn CategorizedError + Send + Sync>),
     /// The writer thread has stopped (after a fatal I/O error, or shutdown); the
     /// database is no longer writable.
     #[error("writer stopped: {reason}")]
@@ -63,6 +71,7 @@ impl CategorizedError for TxnError {
         match self {
             TxnError::Pager(e) => e.category(),
             TxnError::BTree(e) => e.category(),
+            TxnError::Rejected(e) => e.category(),
             TxnError::WriterStopped { .. } | TxnError::Closed => ErrorCategory::Io,
         }
     }

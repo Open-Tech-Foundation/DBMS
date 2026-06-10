@@ -168,6 +168,21 @@ impl<'p, B: IoBackend> BTree<'p, B> {
         })
     }
 
+    /// Collect every page id reachable from `root` — the whole tree, in no
+    /// particular order. Used by callers that retire an entire tree (e.g.
+    /// `drop table`) and must hand all of its pages to deferred reclamation.
+    pub fn pages(&self, root: PageId) -> Result<Vec<PageId>> {
+        let mut out = Vec::new();
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            out.push(id);
+            if let Node::Internal { children, .. } = self.read_node(id)? {
+                stack.extend(children);
+            }
+        }
+        Ok(out)
+    }
+
     // --- internals -------------------------------------------------------
 
     fn read_node(&self, id: PageId) -> Result<Node> {

@@ -8,6 +8,47 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 
 ## [Unreleased]
 
+### Phase 6 — Schema, catalog & constraints
+
+#### Added
+- `catalog`: strict typed tables over the transaction layer — the schema
+  model (`TableDef`/`ColumnDef`: types, single/composite PK, NOT NULL,
+  UNIQUE, CHECK, DEFAULT values + `now`/`uuid_v7` generators, auto-increment,
+  rowversion, `on_update: now`, `update: free | guarded`) with definition
+  validation, persisted in the in-file system catalog.
+- The system catalog **is** the published-root B+tree (`DECISIONS.md` D14):
+  per table a schema entry, a data-root entry, and an auto-increment sequence
+  entry — one commit covers schema + data atomically and one snapshot pins
+  both consistently.
+- DDL as ordinary write transactions: `create_table`, `drop_table` (frees the
+  whole table tree via deferred reclamation), `add_column` (nullable or
+  constant default; old rows padded lazily on read — D17).
+- Row DML with full constraint enforcement on insert and update; multi-row
+  `insert_many` is atomic (in-batch PK/UNIQUE collisions included); typed
+  per-constraint errors mapped to the `SPEC.md` §9 taxonomy.
+- Provisional `CheckExpr` (comparisons + boolean combinators, SQL 3VL: NULL
+  passes — D15) and provisional scan-based UNIQUE probes until Phase 7's
+  unique indexes (D16).
+- Engine-managed values under the writer: auto-increment (durable sequence,
+  no reuse across reopen), rowversion (1, then +1 per update), `now` /
+  `uuid_v7` defaults and `on_update: now` driven by the injected clock/RNG.
+- Exit-criteria tests: create/reopen/inspect round-trip, one violation test
+  per constraint, guarded persisted/readable, generated values under a
+  manual clock, multi-row atomicity, snapshot consistency across DDL+DML.
+
+#### Changed
+- `txn`: write transactions generalized to a `WriteJob` trait run against a
+  `WriteCtx` (multi-tree edits, typed post-commit outputs); `Db<B>` is now an
+  alias for `JobDb<B, OpsJob>` (API unchanged); the writer classifies job
+  errors by category (`Io`/`Corruption` fatal, others reject the one
+  transaction); new `TxnError::Rejected` carries a higher layer's typed
+  error across the writer thread; `Snapshot` gains `root`/`get_in`/
+  `range_in`/`scan_in` for reading trees under the pinned root.
+- `btree`: `BTree::pages` collects every page of a tree (drop-table
+  reclamation).
+- `types`: `UuidV7Gen` now owns `Arc<dyn Clock>`/`Arc<dyn Rng>` so generator
+  state can span transactions.
+
 ### Phase 5 — Types, values & encoding
 
 #### Added

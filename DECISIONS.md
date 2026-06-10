@@ -5,6 +5,74 @@ Per `PLAN.md` §1 rule 6, every resolution of an ambiguity or deviation from
 
 ---
 
+## D17 — Write-path semantics the SPEC leaves open
+
+**Phase:** 6 · **Status:** accepted
+
+`SPEC.md` §4 defines the constraint set but not every edge of the write path.
+Phase 6 fixes these (each is a one-line change later if v2 decides otherwise):
+
+- **PK columns are immutable** — an update touching one is rejected
+  (`PkImmutable`). Change-of-key is delete + insert.
+- **Engine-managed columns reject explicit writes**: `rowversion` and
+  `on_update: now` columns can never be set by the caller.
+- **`rowversion` starts at 1** on insert and bumps by 1 on every update.
+- **`on_update: now` also stamps on insert** (an `updated_at` is never NULL).
+- **Explicit values on auto-increment columns are allowed**; the sequence
+  advances past them (`seq = max(seq, given + 1)`), so generated keys never
+  collide. The sequence is a catalog entry — durable, gaps allowed, no reuse
+  after crash/reopen.
+- **`add column`** requires nullable or a *constant* default; existing rows
+  are padded lazily on read (generators cannot backfill), no rewrite.
+- **UNIQUE ignores NULLs** (multiple NULLs allowed, SQL semantics).
+
+## D16 — UNIQUE enforced by a scan probe until Phase 7
+
+**Phase:** 6 · **Status:** accepted (provisional)
+
+`SPEC.md` §4.1 says UNIQUE is "enforced via a unique index", but `index` is
+Phase 7. Phase 6 enforces the constraint **correctly but provisionally** with
+a full-table scan probe (one scan per write batch). Phase 7's unique indexes
+replace the probe with an index lookup; behavior is unchanged, only cost.
+
+## D15 — Provisional CHECK expressions with SQL three-valued logic
+
+**Phase:** 6 · **Status:** accepted (provisional)
+
+`SPEC.md` §4.1 allows `CHECK(<expr>)` over the row, but the expression
+language (§5.2) arrives with the query layer in Phases 8–9.
+
+**Decision:** Phase 6 ships a minimal `CheckExpr` — column-vs-literal
+comparisons, `and`/`or`/`not`, `is_null`/`is_not_null` — validated at DDL
+(columns exist, literal kinds match) and stored in the catalog. Evaluation
+follows SQL 3VL: a CHECK is violated only when it is definitively **false**;
+NULL/unknown passes. The Phase 8/9 expression engine supersedes the enum
+(same precedent as Phase 3's provisional byte keys).
+
+## D14 — One published root: the catalog tree owns everything
+
+**Phase:** 6 · **Status:** accepted
+
+`ARCHITECTURE.md` §3.5 stores the system catalog "in B+trees referenced from
+the meta page" but leaves the multi-tree commit mechanics open.
+
+**Decision:**
+- The meta page's root **is the catalog B+tree**; every other tree hangs off
+  it. Per table: `("tbl", name)` → schema (changes on DDL), `("root", name)` →
+  data-tree root (changes on every write), `("seq", name)` → auto-increment
+  cursor. A write to table T updates T's tree, then T's root entry, producing
+  one new catalog root — so one root install + one fsync pair commits schema
+  and data atomically, and a snapshot pins both consistently.
+- `txn` generalizes to **`WriteJob`/`WriteCtx`**: a job runs on the writer
+  thread, edits any tree under the root, and returns a typed output delivered
+  after durable commit. `Db<B>` is now an alias for `JobDb<B, OpsJob>` — the
+  Phase 4 API and tests are unchanged. Jobs inherit D8's validate-then-apply
+  contract; the writer classifies job errors **by category** (`Io`/
+  `Corruption` fatal, everything else rejects just that transaction, with the
+  root and freed-list restored defensively). Rejections cross the thread as
+  `TxnError::Rejected(Box<dyn CategorizedError>)` and downcast back to the
+  catalog's typed error at the API surface.
+
 ## D13 — No `u64` value type; `rowversion` columns are `i64`
 
 **Phase:** 5 · **Status:** accepted (SPEC inconsistency, raised)
