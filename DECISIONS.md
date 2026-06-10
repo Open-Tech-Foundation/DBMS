@@ -5,6 +5,54 @@ Per `PLAN.md` §1 rule 6, every resolution of an ambiguity or deviation from
 
 ---
 
+## D13 — No `u64` value type; `rowversion` columns are `i64`
+
+**Phase:** 5 · **Status:** accepted (SPEC inconsistency, raised)
+
+`SPEC.md` §4.3's example schema declares `version: { type: u64, rowversion:
+true }`, but §3's authoritative type table has no `u64`.
+
+**Decision:** the `Value` model implements exactly the §3 table; there is no
+`u64`. A `rowversion` counter fits comfortably in `i64` (~9.2 × 10¹⁸ writes),
+so Phase 6 models `rowversion` columns as `i64`. Recorded here rather than
+silently extending the type system.
+
+## D12 — Key-encoding order: nulls first, one canonical NaN above +inf
+
+**Phase:** 5 · **Status:** accepted
+
+`ARCHITECTURE.md` §3.4 mandates `bytewise_cmp(encode(a), encode(b)) ==
+logical_cmp(a, b)` with "a total order over floats" and "defined null
+ordering", but fixes neither choice.
+
+**Decision:**
+- **Nulls sort first**, engine-wide (tag `0x01`, the lowest).
+- **Floats** use the IEEE-754 total order (`-0.0 < +0.0`), with **every NaN
+  canonicalized to the one positive quiet NaN**, sorting above `+inf`. Key
+  equality follows the same total order (`NaN == NaN`), so NaN keys are
+  well-behaved rather than unmatchable.
+- **Variable-length components** (`text`/`blob`) are escape-coded
+  (`0x00` → `0x00 0xFF`, terminator `0x00 0x00`): prefix-free, so composite
+  keys are plain concatenation and prefixes sort first.
+- The encoding is **decodable** (exact round-trip): Phase 7 recovers PK
+  suffixes from non-unique index entries instead of storing the PK twice.
+- `json` is opaque in v1 and **not keyable** (typed `NotKeyable` error).
+
+## D11 — In-house minimal MessagePack codec
+
+**Phase:** 5 · **Status:** accepted
+
+The wire mapping, `json` storage, and Phase 8's AST decode all need
+MessagePack. `rmp`/`rmpv` would be the first unvetted external dependencies
+(D4 keeps the graph at `thiserror` only), and the engine needs a *hardened*
+decoder (depth limits, no panics on hostile bytes) more than a featureful one.
+
+**Decision:** implement the needed subset in `types::msgpack`: compact int /
+str / bin / array / map encode, schema-directed value decode, and a
+well-formedness walk with `MAX_JSON_DEPTH = 64`, rejecting the reserved byte
+`0xC1` and all ext types in v1 documents. Phase 8 builds its AST decoding on
+this module.
+
 ## D10 — Pager commit releases the state lock across fsyncs
 
 **Phase:** 4 · **Status:** accepted

@@ -50,7 +50,7 @@ impl Error {
     /// use otf_dbms::{Error, ErrorCategory};
     ///
     /// // A type error surfaces as a `Validation` category error.
-    /// let err: Error = types::TypeError::Invalid.into();
+    /// let err: Error = types::TypeError::BadUuid.into();
     /// assert_eq!(err.category(), ErrorCategory::Validation);
     /// ```
     pub fn category(&self) -> ErrorCategory {

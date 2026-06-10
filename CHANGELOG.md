@@ -8,6 +8,37 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 
 ## [Unreleased]
 
+### Phase 5 — Types, values & encoding
+
+#### Added
+- `types`: the `Value` model covering every v1 type (`SPEC.md` §3), with the
+  engine's logical total order (`Eq`/`Ord` follow it: nulls first, IEEE-754
+  float total order with one canonical NaN — `DECISIONS.md` D12).
+- The **order-preserving key encoding** (`encode_key`/`decode_key`): bytewise
+  comparison of encoded keys equals logical comparison, for single and
+  composite keys; prefix-free escape-coded text/blob; exactly decodable;
+  `json` is not keyable.
+- The row encoding (`encode_row`/`decode_row`): compact, self-describing,
+  exact round-trip, typed `RowCorrupt` errors on hostile bytes.
+- An in-house, hardened minimal MessagePack codec (`DECISIONS.md` D11): the
+  wire mapping for values (`encode_value`/schema-directed `decode_value`;
+  uuid as canonical string, timestamp as int) and the `json` well-formedness
+  gate (`validate_json`: depth-limited, rejects reserved/ext bytes, trailing
+  bytes, truncation).
+- `UuidV7Gen`: RFC 9562 UUIDv7 over the injected `Clock`/`Rng`, strictly
+  monotonic within a run (counter in `rand_a`, timestamp nudge on overflow),
+  plus canonical-string format/parse.
+- Exit-criteria tests: the order property (`bytewise_cmp(encode(a),encode(b))
+  == logical_cmp(a,b)`) over curated edge cases, seeded random values, and
+  composites; key/row/wire round-trips; malformed-json rejection; decoder
+  no-panic fuzz; UUIDv7 monotonicity under clock stall/backstep.
+- Decision D13: no `u64` value type (SPEC §4.3/§3 inconsistency, raised);
+  `rowversion` will be `i64`.
+
+#### Changed
+- `clippy.toml`: `allow-panic-in-tests = true`, completing the declared
+  "test code may use them freely" scoping of operating rule 3.
+
 ### Phase 4 — Transactions, MVCC & durability
 
 #### Added
