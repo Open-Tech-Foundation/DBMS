@@ -26,6 +26,7 @@ version = "0.0.0"
 dependencies = [
  "btree",
  "common",
+ "index",
  "pager",
  "thiserror",
  "txn",
@@ -88,6 +89,7 @@ name = "index"
 version = "0.0.0"
 dependencies = [
  "common",
+ "pager",
  "thiserror",
  "txn",
  "types",

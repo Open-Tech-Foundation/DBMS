@@ -9,7 +9,7 @@ use types::{UuidV7Gen, Value};
 
 use crate::codec::decode_table;
 use crate::job::{decode_padded, CatalogJob, Env, JobOp, JobOut};
-use crate::schema::{ColumnDef, TableDef};
+use crate::schema::{ColumnDef, IndexDef, TableDef};
 use crate::store;
 use crate::{CatalogCorruption, CatalogError, Result};
 
@@ -82,6 +82,26 @@ impl<B: IoBackend + 'static> Catalog<B> {
         self.submit(JobOp::AddColumn {
             table: table.to_string(),
             column,
+        })
+        .map(|_| ())
+    }
+
+    /// `create index` — validate, **backfill from existing rows** (unique
+    /// violations reject the DDL), and persist.
+    pub fn create_index(&self, table: &str, index: IndexDef) -> Result<()> {
+        self.submit(JobOp::CreateIndex {
+            table: table.to_string(),
+            index,
+        })
+        .map(|_| ())
+    }
+
+    /// `drop index` — remove the definition and free the index's pages. The
+    /// implicit index backing a `unique` column cannot be dropped.
+    pub fn drop_index(&self, table: &str, index: &str) -> Result<()> {
+        self.submit(JobOp::DropIndex {
+            table: table.to_string(),
+            index: index.to_string(),
         })
         .map(|_| ())
     }
@@ -213,8 +233,64 @@ impl<B: IoBackend> CatSnapshot<B> {
         Ok(rows)
     }
 
+    /// Cross-check the whole database: every tree is structurally valid and
+    /// **every index matches its base table entry-for-entry** (the Phase 7
+    /// exit criterion). Read-only, over this snapshot's pinned version.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(cat_root) = self.snap.root() {
+            self.snap.validate_tree(cat_root)?;
+        }
+        for table in self.tables()? {
+            let def = self.table(&table)?;
+            let data_root = self.data_root(&table)?;
+            self.snap.validate_tree(data_root)?;
+            let base = self.snap.scan_in(data_root)?;
+
+            for idx in &def.indexes {
+                let iroot = self.index_root(&table, &idx.name)?;
+                self.snap.validate_tree(iroot)?;
+
+                // Brute-force expectation from the base rows.
+                let mut expected: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+                for (pk_key, bytes) in &base {
+                    let row = decode_padded(&def, bytes)?;
+                    let cols: Vec<types::Value> = idx
+                        .columns
+                        .iter()
+                        .map(|name| {
+                            def.col_index(name)
+                                .and_then(|ci| row.get(ci).cloned())
+                                .unwrap_or(types::Value::Null)
+                        })
+                        .collect();
+                    if let Some(e) = index::entry(&cols, pk_key, idx.unique)? {
+                        expected.push((e.key, e.value));
+                    }
+                }
+                expected.sort();
+
+                let actual = self.snap.scan_in(iroot)?;
+                if expected != actual {
+                    return Err(CatalogError::IndexOutOfSync {
+                        table: table.clone(),
+                        index: idx.name.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn data_root(&self, table: &str) -> Result<pager::PageId> {
         let key = store::root_key(table)?;
+        match self.snap.get(&key)? {
+            Some(bytes) => store::decode_root(&bytes),
+            None => Err(CatalogError::Corrupt(CatalogCorruption::MissingEntry)),
+        }
+    }
+
+    fn index_root(&self, table: &str, index: &str) -> Result<pager::PageId> {
+        let key = store::iroot_key(table, index)?;
         match self.snap.get(&key)? {
             Some(bytes) => store::decode_root(&bytes),
             None => Err(CatalogError::Corrupt(CatalogCorruption::MissingEntry)),

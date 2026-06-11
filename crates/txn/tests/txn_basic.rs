@@ -83,6 +83,33 @@ fn a_transaction_is_atomic_all_or_nothing() {
 }
 
 #[test]
+fn a_rejected_transaction_does_not_desync_reclamation() {
+    // Regression: the writer used to reclaim parked pages at the start of
+    // every batch — including one whose only transaction is rejected. Such a
+    // batch never commits, leaving the in-memory freelist ahead of the disk
+    // (caught by `validate()` as freelist corruption).
+    let db = Db::create(MemoryBackend::new()).unwrap();
+    db.put(b"k".to_vec(), vec![1u8; 64]).unwrap();
+    // Supersede pages so the next committing batch has work to park/reclaim.
+    db.put(b"k".to_vec(), vec![2u8; 64]).unwrap();
+    db.put(b"k".to_vec(), vec![3u8; 64]).unwrap();
+
+    // A rejected transaction in its own batch (oversized value).
+    assert!(db
+        .write(vec![Op::Put(b"x".to_vec(), vec![0u8; 8192])])
+        .is_err());
+    db.validate().expect("pager state must match the disk");
+
+    // And the database keeps working normally afterwards.
+    db.put(b"k2".to_vec(), b"v".to_vec()).unwrap();
+    db.validate().unwrap();
+    assert_eq!(
+        db.snapshot().get(b"k").unwrap().as_deref(),
+        Some(&[3u8; 64][..])
+    );
+}
+
+#[test]
 fn multi_op_transaction_commits_together() {
     let db = Db::create(MemoryBackend::new()).unwrap();
     let txn = db

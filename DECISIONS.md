@@ -5,6 +5,47 @@ Per `PLAN.md` §1 rule 6, every resolution of an ambiguity or deviation from
 
 ---
 
+## D19 — Reclamation only runs inside a committing batch
+
+**Phase:** 7 · **Status:** accepted (bug fix of Phase 4 behavior)
+
+The Phase 4 writer reclaimed watermark-cleared pages at the **start of every
+batch**. A batch whose transactions are all rejected never commits — but
+reclamation had already mutated the pager's in-memory freelist, leaving it
+ahead of the disk (surfaced by `validate()` as freelist corruption; on a
+crash in that window the parked pages would simply leak, as they always do
+when the writer's in-memory park list dies — no disk state was ever wrong).
+
+**Decision:** the writer reclaims **after applying a batch's jobs and only
+when the batch will commit**, so the freelist changes ride the same fsync
+pair. Pages a batch frees become reusable one batch later (instead of within
+the same batch) — a negligible cost. Found by Phase 7's `drop index` tests;
+regression-tested at the txn layer.
+
+## D18 — Index entry contract: PK as value, NULL rows skip unique indexes
+
+**Phase:** 7 · **Status:** accepted
+
+`ARCHITECTURE.md` §3.6 fixes the key shape (encoded indexed columns, PK
+suffix when non-unique) but leaves the entry value and NULL semantics open.
+
+**Decision:**
+- **Entry value = the encoded PK** (the base-tree key) for both unique and
+  non-unique indexes: uniform, and resolving an entry to its row is one base
+  lookup without re-deriving key suffixes.
+- **Unique indexes skip rows with any NULL indexed column** — NULLs never
+  conflict (D17), and since unique entries carry no PK suffix, storing NULL
+  rows would falsely collide. Non-unique indexes include NULL rows (nulls
+  sort first, queryable).
+- **`unique` columns are enforced by an implicit single-column unique
+  index** named `uniq_<table>_<column>` (replacing D16's provisional scan
+  probe). The implicit backing cannot be dropped; `drop table` frees index
+  trees with the base.
+- Index names are per-table; the catalog stores one `("iroot", table, index)`
+  root entry per index, updated in the same commit as the base root. The
+  table-definition codec is now **version 2** (v1 records still decode,
+  index-less).
+
 ## D17 — Write-path semantics the SPEC leaves open
 
 **Phase:** 6 · **Status:** accepted

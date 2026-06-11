@@ -77,10 +77,6 @@ impl<B: IoBackend> Writer<B> {
     }
 
     fn process_batch<J: WriteJob<B>>(&mut self, batch: Vec<Request<B, J>>) -> Result<()> {
-        // Return pages that no live snapshot can see to the allocator first, so
-        // this batch can reuse them.
-        self.reclaim()?;
-
         let mut replies: Vec<PendingReply<B, J>> = Vec::with_capacity(batch.len());
         let mut batch_freed: Vec<PageId> = Vec::new();
         let root_before = self.root;
@@ -118,6 +114,16 @@ impl<B: IoBackend> Writer<B> {
         // CoW only ever moves the root to a fresh page, so an unmoved root means
         // nothing changed and there is nothing to commit.
         let committed_txn = if self.root != root_before {
+            // Return pages no live snapshot can see to the allocator *inside*
+            // a committing batch, so the freelist changes ride this commit.
+            // (Reclaiming in a batch that ends up not committing would leave
+            // the in-memory freelist ahead of the disk.)
+            if let Err(fatal) = self.reclaim() {
+                for (resp, _) in replies {
+                    let _ = resp.send(Err(clone_fatal(&fatal)));
+                }
+                return Err(fatal);
+            }
             self.pager.set_catalog_root(Some(self.root));
             if let Err(fatal) = self.pager.commit() {
                 let fatal = TxnError::from(fatal);

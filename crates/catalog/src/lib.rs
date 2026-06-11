@@ -45,7 +45,9 @@ use common::{CategorizedError, ErrorCategory};
 use types::TypeKind;
 
 pub use db::{CatSnapshot, Catalog};
-pub use schema::{CheckExpr, CmpOp, ColumnDef, DefaultSpec, TableDef, UpdatePolicy};
+pub use schema::{
+    implicit_index_name, CheckExpr, CmpOp, ColumnDef, DefaultSpec, IndexDef, TableDef, UpdatePolicy,
+};
 
 /// How stored catalog bytes can be malformed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +109,9 @@ pub enum CatalogError {
     /// An error from the type/encoding layer.
     #[error(transparent)]
     Type(#[from] types::TypeError),
+    /// An error from the index layer.
+    #[error(transparent)]
+    Index(#[from] index::IndexError),
     /// Stored catalog bytes are corrupt.
     #[error("corrupt catalog: {0}")]
     Corrupt(CatalogCorruption),
@@ -187,13 +192,39 @@ pub enum CatalogError {
         /// The table written.
         table: String,
     },
-    /// A UNIQUE column collision.
-    #[error("unique violation on column {column:?} of table {table:?}")]
+    /// A unique-index collision (including the implicit index backing a
+    /// `unique` column).
+    #[error("unique violation on index {index:?} of table {table:?}")]
     UniqueViolation {
         /// The table written.
         table: String,
-        /// The UNIQUE column.
-        column: String,
+        /// The violated unique index.
+        index: String,
+    },
+    /// `create index` for a name that already exists on the table.
+    #[error("index {index:?} already exists on table {table:?}")]
+    IndexExists {
+        /// The table.
+        table: String,
+        /// The conflicting index name.
+        index: String,
+    },
+    /// The named index does not exist on the table.
+    #[error("unknown index {index:?} on table {table:?}")]
+    UnknownIndex {
+        /// The table searched.
+        table: String,
+        /// The missing index name.
+        index: String,
+    },
+    /// An index disagrees with its base table (corruption or a maintenance
+    /// bug), found by [`CatSnapshot::validate`].
+    #[error("index {index:?} of table {table:?} is out of sync with its base")]
+    IndexOutOfSync {
+        /// The table.
+        table: String,
+        /// The inconsistent index.
+        index: String,
     },
     /// A CHECK constraint evaluated to false.
     #[error("check constraint #{index} of table {table:?} violated")]
@@ -210,6 +241,7 @@ impl CategorizedError for CatalogError {
         match self {
             CatalogError::Txn(e) => e.category(),
             CatalogError::Type(e) => e.category(),
+            CatalogError::Index(e) => e.category(),
             CatalogError::Corrupt(_) => ErrorCategory::Corruption,
             CatalogError::InvalidSchema { .. }
             | CatalogError::TableExists { .. }
@@ -217,9 +249,11 @@ impl CategorizedError for CatalogError {
             | CatalogError::DuplicateColumn { .. }
             | CatalogError::EngineManagedColumn { .. }
             | CatalogError::PkImmutable { .. } => ErrorCategory::Validation,
-            CatalogError::UnknownTable { .. } | CatalogError::RowNotFound { .. } => {
-                ErrorCategory::NotFound
-            }
+            CatalogError::UnknownTable { .. }
+            | CatalogError::RowNotFound { .. }
+            | CatalogError::UnknownIndex { .. } => ErrorCategory::NotFound,
+            CatalogError::IndexExists { .. } => ErrorCategory::Validation,
+            CatalogError::IndexOutOfSync { .. } => ErrorCategory::Corruption,
             CatalogError::NotNull { .. }
             | CatalogError::TypeMismatch { .. }
             | CatalogError::DuplicateKey { .. }

@@ -9,6 +9,7 @@
 //! | `("tbl", name)`  | encoded [`TableDef`](crate::TableDef) | on DDL |
 //! | `("root", name)` | the table's data-tree root (8 B LE)   | on every write |
 //! | `("seq", name)`  | next auto-increment value (8 B LE)    | on auto-key inserts |
+//! | `("iroot", table, index)` | an index tree's root (8 B LE) | on writes touching it |
 
 use pager::PageId;
 use types::{encode_key, Value};
@@ -18,6 +19,7 @@ use crate::{CatalogCorruption, CatalogError, Result};
 const TBL: &str = "tbl";
 const ROOT: &str = "root";
 const SEQ: &str = "seq";
+const IROOT: &str = "iroot";
 
 fn entry_key(band: &str, table: &str) -> Result<Vec<u8>> {
     Ok(encode_key(&[
@@ -39,6 +41,29 @@ pub(crate) fn root_key(table: &str) -> Result<Vec<u8>> {
 /// The key of a table's auto-increment sequence entry.
 pub(crate) fn seq_key(table: &str) -> Result<Vec<u8>> {
     entry_key(SEQ, table)
+}
+
+/// The key of one index's root entry.
+pub(crate) fn iroot_key(table: &str, index: &str) -> Result<Vec<u8>> {
+    Ok(encode_key(&[
+        Value::Text(IROOT.to_string()),
+        Value::Text(table.to_string()),
+        Value::Text(index.to_string()),
+    ])?)
+}
+
+/// The `[lo, hi)` range containing exactly `table`'s `("iroot", table, *)`
+/// band (same terminator-bump trick as [`tbl_band`]).
+pub(crate) fn iroot_band(table: &str) -> Result<(Vec<u8>, Vec<u8>)> {
+    let lo = encode_key(&[
+        Value::Text(IROOT.to_string()),
+        Value::Text(table.to_string()),
+    ])?;
+    let mut hi = lo.clone();
+    if let Some(last) = hi.last_mut() {
+        *last = 0x01;
+    }
+    Ok((lo, hi))
 }
 
 /// The `[lo, hi)` range containing exactly the `("tbl", *)` band.

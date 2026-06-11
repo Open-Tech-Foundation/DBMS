@@ -8,6 +8,47 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 
 ## [Unreleased]
 
+### Phase 7 — Indexing
+
+#### Added
+- `index`: the secondary-index entry contract — keys are the
+  order-preserving encoding of the indexed columns (+ encoded-PK suffix for
+  non-unique indexes); entry values are the encoded PK; unique indexes skip
+  rows with NULL indexed columns, non-unique include them (`DECISIONS.md`
+  D18) — plus probe/prefix-scan bounds and thin maintenance ops over
+  `txn::WriteCtx`.
+- `catalog`: `IndexDef` (single-column, composite, unique) persisted in the
+  table definition (codec v2; v1 records still decode); per-index
+  `("iroot", table, index)` root entries committed atomically with the base
+  root.
+- Index DDL: `create_index` (validates, **backfills from existing rows**,
+  rejects unique violations found in the data) and `drop_index` (frees the
+  index tree; the implicit backing of a `unique` column cannot be dropped).
+- Automatic maintenance in the same write transaction as every insert /
+  update / delete — updates touch only indexes whose keys changed; multi-row
+  atomicity covers index entries (in-batch unique collisions included).
+- `unique` columns now create **implicit unique indexes**
+  (`uniq_<table>_<column>`) and are enforced by index probes — D16's
+  provisional scan probe is deleted.
+- `CatSnapshot::validate()`: structural validation of every tree plus an
+  entry-for-entry **brute-force cross-check of every index against its base
+  table**, over the snapshot's pinned version.
+- Exit-criteria tests: seeded random-DML property test (insert/update/delete
+  against a model; every index brute-force-checked along the way), unique
+  violations at insert/update/backfill, atomicity, page reclamation for
+  dropped indexes/tables, pinned-snapshot consistency.
+
+#### Changed
+- `txn`: `Snapshot::validate_tree` exposes the B+tree structural validator
+  for trees under the pinned root.
+
+#### Fixed
+- `txn`: the writer reclaimed watermark-cleared pages at the start of
+  **every** batch, including batches that end up committing nothing (all
+  transactions rejected) — leaving the in-memory freelist ahead of the disk
+  until the next commit, which `validate()` reported as freelist corruption.
+  Reclamation now runs only inside committing batches (`DECISIONS.md` D19).
+
 ### Phase 6 — Schema, catalog & constraints
 
 #### Added

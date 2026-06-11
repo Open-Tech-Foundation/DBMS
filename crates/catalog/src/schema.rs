@@ -286,6 +286,43 @@ impl CheckExpr {
     }
 }
 
+/// One secondary-index definition.
+///
+/// A `unique` column on a table implicitly creates a single-column unique
+/// index named [`implicit_index_name`]`(table, column)` — that index *is* the
+/// constraint's enforcement (`SPEC.md` §4.1) and cannot be dropped directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexDef {
+    /// The index name (unique within its table).
+    pub name: String,
+    /// The indexed column names, in key order.
+    pub columns: Vec<String>,
+    /// Whether the indexed columns must be unique across rows.
+    pub unique: bool,
+}
+
+impl IndexDef {
+    /// A non-unique index over `columns`.
+    pub fn new(name: impl Into<String>, columns: Vec<impl Into<String>>) -> Self {
+        IndexDef {
+            name: name.into(),
+            columns: columns.into_iter().map(Into::into).collect(),
+            unique: false,
+        }
+    }
+
+    /// Mark the index unique.
+    pub fn unique(mut self) -> Self {
+        self.unique = true;
+        self
+    }
+}
+
+/// The auto-generated name of the index backing a `unique` column.
+pub fn implicit_index_name(table: &str, column: &str) -> String {
+    format!("uniq_{table}_{column}")
+}
+
 /// One table definition.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableDef {
@@ -297,6 +334,8 @@ pub struct TableDef {
     pub pk: Vec<String>,
     /// CHECK constraints over the row.
     pub checks: Vec<CheckExpr>,
+    /// Secondary indexes (user-defined and implicit `unique` backings).
+    pub indexes: Vec<IndexDef>,
 }
 
 impl TableDef {
@@ -311,6 +350,7 @@ impl TableDef {
             columns,
             pk: pk.into_iter().map(Into::into).collect(),
             checks: Vec::new(),
+            indexes: Vec::new(),
         }
     }
 
@@ -318,6 +358,28 @@ impl TableDef {
     pub fn check(mut self, expr: CheckExpr) -> Self {
         self.checks.push(expr);
         self
+    }
+
+    /// Attach a secondary index.
+    pub fn index(mut self, index: IndexDef) -> Self {
+        self.indexes.push(index);
+        self
+    }
+
+    /// The position of `index` in [`indexes`](Self::indexes), if it exists.
+    pub fn index_pos(&self, index: &str) -> Option<usize> {
+        self.indexes.iter().position(|i| i.name == index)
+    }
+
+    /// Whether `index` is the implicit backing of a `unique` column (and so
+    /// cannot be dropped while the column keeps the constraint).
+    pub fn backs_unique_column(&self, index: &IndexDef) -> bool {
+        index.unique
+            && index.columns.len() == 1
+            && index.columns.first().is_some_and(|col| {
+                index.name == implicit_index_name(&self.name, col)
+                    && self.columns.iter().any(|c| c.name == *col && c.unique)
+            })
     }
 
     /// The index of `column` in [`columns`](Self::columns), if it exists.
@@ -423,7 +485,51 @@ impl TableDef {
         for check in &self.checks {
             check.validate(self, 0)?;
         }
+
+        for (i, index) in self.indexes.iter().enumerate() {
+            if index.name.is_empty() {
+                return Err(invalid("index names must not be empty"));
+            }
+            if self.indexes[..i].iter().any(|x| x.name == index.name) {
+                return Err(invalid("duplicate index name"));
+            }
+            if index.columns.is_empty() {
+                return Err(invalid("an index needs at least one column"));
+            }
+            for (j, name) in index.columns.iter().enumerate() {
+                if index.columns[..j].contains(name) {
+                    return Err(invalid("duplicate column within an index"));
+                }
+                let Some(col) = self.columns.iter().find(|c| c.name == *name) else {
+                    return Err(CatalogError::UnknownColumn {
+                        table: self.name.clone(),
+                        column: name.clone(),
+                    });
+                };
+                if col.kind == TypeKind::Json {
+                    return Err(invalid("json columns cannot be indexed"));
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Append the implicit unique index for every `unique` column that does
+    /// not have its backing index yet. Run before persisting a definition so
+    /// the constraint is always index-enforced (`SPEC.md` §4.1).
+    pub(crate) fn materialize_implicit_indexes(&mut self) {
+        let needed: Vec<IndexDef> = self
+            .columns
+            .iter()
+            .filter(|c| c.unique)
+            .map(|c| IndexDef {
+                name: implicit_index_name(&self.name, &c.name),
+                columns: vec![c.name.clone()],
+                unique: true,
+            })
+            .filter(|idx| self.index_pos(&idx.name).is_none())
+            .collect();
+        self.indexes.extend(needed);
     }
 }
 

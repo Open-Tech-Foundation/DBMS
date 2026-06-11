@@ -11,6 +11,7 @@ description = "Secondary B+tree index maintenance, kept atomic with base-row wri
 
 [dependencies]
 common.workspace = true
+pager.workspace = true
 types.workspace = true
 txn.workspace = true
 thiserror.workspace = true

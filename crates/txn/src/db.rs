@@ -229,6 +229,12 @@ impl<B: IoBackend> Snapshot<B> {
     pub fn scan_in(&self, root: PageId) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         self.range_in(root, None, None)
     }
+
+    /// Run the B+tree structural validator over the tree at `root` (see
+    /// [`get_in`](Self::get_in) for the reachability contract).
+    pub fn validate_tree(&self, root: PageId) -> Result<btree::TreeStats> {
+        Ok(BTree::new(&*self.pager).validate(root)?)
+    }
 }
 
 impl<B: IoBackend> Drop for Snapshot<B> {

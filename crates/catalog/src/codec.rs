@@ -8,11 +8,14 @@
 use types::{decode_row, encode_row, TypeKind, Value};
 
 use crate::schema::{
-    CheckExpr, CmpOp, ColumnDef, DefaultSpec, TableDef, UpdatePolicy, MAX_CHECK_DEPTH,
+    CheckExpr, CmpOp, ColumnDef, DefaultSpec, IndexDef, TableDef, UpdatePolicy, MAX_CHECK_DEPTH,
 };
 use crate::{CatalogCorruption, CatalogError, Result};
 
-const VERSION: u8 = 1;
+/// Version 2 added the secondary-index section (Phase 7); version-1 records
+/// (no indexes) still decode.
+const VERSION: u8 = 2;
+const VERSION_NO_INDEXES: u8 = 1;
 
 const FLAG_NULLABLE: u8 = 1 << 0;
 const FLAG_UNIQUE: u8 = 1 << 1;
@@ -79,6 +82,15 @@ pub(crate) fn encode_table(def: &TableDef) -> Result<Vec<u8>> {
     for check in &def.checks {
         push_check(&mut out, check)?;
     }
+    push_count(&mut out, def.indexes.len())?;
+    for index in &def.indexes {
+        push_str(&mut out, &index.name)?;
+        out.push(u8::from(index.unique));
+        push_count(&mut out, index.columns.len())?;
+        for col in &index.columns {
+            push_str(&mut out, col)?;
+        }
+    }
     Ok(out)
 }
 
@@ -86,7 +98,7 @@ pub(crate) fn encode_table(def: &TableDef) -> Result<Vec<u8>> {
 pub(crate) fn decode_table(bytes: &[u8]) -> Result<TableDef> {
     let mut r = Reader { rest: bytes };
     let version = r.byte()?;
-    if version != VERSION {
+    if version != VERSION && version != VERSION_NO_INDEXES {
         return Err(corrupt(CatalogCorruption::BadVersion { version }));
     }
     let name = r.string()?;
@@ -129,6 +141,29 @@ pub(crate) fn decode_table(bytes: &[u8]) -> Result<TableDef> {
     for _ in 0..check_count {
         checks.push(r.check(0)?);
     }
+    let mut indexes = Vec::new();
+    if version >= VERSION {
+        let index_count = r.count()?;
+        indexes.reserve(index_count.min(64));
+        for _ in 0..index_count {
+            let name = r.string()?;
+            let unique = match r.byte()? {
+                0 => false,
+                1 => true,
+                tag => return Err(corrupt(CatalogCorruption::BadTag { tag })),
+            };
+            let col_count = r.count()?;
+            let mut cols = Vec::with_capacity(col_count.min(16));
+            for _ in 0..col_count {
+                cols.push(r.string()?);
+            }
+            indexes.push(IndexDef {
+                name,
+                columns: cols,
+                unique,
+            });
+        }
+    }
     if !r.rest.is_empty() {
         return Err(corrupt(CatalogCorruption::TrailingBytes));
     }
@@ -137,6 +172,7 @@ pub(crate) fn decode_table(bytes: &[u8]) -> Result<TableDef> {
         columns,
         pk,
         checks,
+        indexes,
     })
 }
 

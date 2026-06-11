@@ -2,17 +2,22 @@
 //! enforcing every `SPEC.md` §4 constraint under the validate-then-apply
 //! contract — all probes and checks complete before the first tree mutation,
 //! so a rejected transaction is a guaranteed no-op.
+//!
+//! Secondary indexes are maintained **inside the same job** as the base-row
+//! change (`ARCHITECTURE.md` §3.6): one commit, one published root — base and
+//! indexes are never observed out of sync.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use common::{Clock, IoBackend};
+use index::Entry;
 use pager::PageId;
 use txn::{TxnError, WriteCtx, WriteJob};
 use types::{encode_key, encode_row, UuidV7Gen, Value};
 
 use crate::codec::{decode_table, encode_table};
-use crate::schema::{ColumnDef, DefaultSpec, TableDef};
+use crate::schema::{ColumnDef, DefaultSpec, IndexDef, TableDef};
 use crate::store;
 use crate::CatalogError;
 
@@ -34,6 +39,14 @@ pub(crate) enum JobOp {
     AddColumn {
         table: String,
         column: ColumnDef,
+    },
+    CreateIndex {
+        table: String,
+        index: IndexDef,
+    },
+    DropIndex {
+        table: String,
+        index: String,
     },
     Insert {
         table: String,
@@ -69,6 +82,8 @@ impl<B: IoBackend> WriteJob<B> for CatalogJob {
             JobOp::CreateTable(def) => create_table(ctx, def),
             JobOp::DropTable(name) => drop_table(ctx, &name),
             JobOp::AddColumn { table, column } => add_column(ctx, &table, column),
+            JobOp::CreateIndex { table, index } => create_index(ctx, &table, index),
+            JobOp::DropIndex { table, index } => drop_index(ctx, &table, &index),
             JobOp::Insert { table, rows } => insert(&self.env, ctx, &table, rows),
             JobOp::Update { table, pk, sets } => update(&self.env, ctx, &table, &pk, sets),
             JobOp::Delete { table, pk } => delete(ctx, &table, &pk),
@@ -81,6 +96,15 @@ impl<B: IoBackend> WriteJob<B> for CatalogJob {
 /// stop the writer, not be retried.)
 fn rej(err: CatalogError) -> TxnError {
     TxnError::Rejected(Box::new(err))
+}
+
+fn idx_err(err: index::IndexError) -> TxnError {
+    match err {
+        // Unwrap transaction errors so the writer's fatal classification
+        // sees them directly; everything else is a typed rejection.
+        index::IndexError::Txn(e) => e,
+        other => rej(CatalogError::Index(other)),
+    }
 }
 
 // --- catalog-tree access ---------------------------------------------------
@@ -113,6 +137,26 @@ fn load_seq<B: IoBackend>(ctx: &WriteCtx<'_, B>, table: &str) -> txn::Result<i64
     }
 }
 
+/// The root of every index of `def`, parallel to `def.indexes`.
+fn load_index_roots<B: IoBackend>(
+    ctx: &WriteCtx<'_, B>,
+    def: &TableDef,
+) -> txn::Result<Vec<PageId>> {
+    let mut roots = Vec::with_capacity(def.indexes.len());
+    for idx in &def.indexes {
+        let key = store::iroot_key(&def.name, &idx.name).map_err(rej)?;
+        match ctx.lookup(ctx.root(), &key)? {
+            Some(bytes) => roots.push(store::decode_root(&bytes).map_err(rej)?),
+            None => {
+                return Err(rej(CatalogError::Corrupt(
+                    crate::CatalogCorruption::MissingEntry,
+                )))
+            }
+        }
+    }
+    Ok(roots)
+}
+
 fn store_entry<B: IoBackend>(
     ctx: &mut WriteCtx<'_, B>,
     key: Vec<u8>,
@@ -123,9 +167,84 @@ fn store_entry<B: IoBackend>(
     Ok(())
 }
 
+fn store_iroot<B: IoBackend>(
+    ctx: &mut WriteCtx<'_, B>,
+    table: &str,
+    index: &str,
+    root: PageId,
+) -> txn::Result<()> {
+    store_entry(
+        ctx,
+        store::iroot_key(table, index).map_err(rej)?,
+        store::encode_root(root),
+    )
+}
+
+// --- index helpers -----------------------------------------------------------
+
+/// The values of `idx`'s columns within a full row, in index order.
+fn index_cols(def: &TableDef, idx: &IndexDef, row: &[Value]) -> Vec<Value> {
+    idx.columns
+        .iter()
+        .map(|name| {
+            def.col_index(name)
+                .and_then(|ci| row.get(ci).cloned())
+                .unwrap_or(Value::Null)
+        })
+        .collect()
+}
+
+/// The entry `row` contributes to `idx`, if any.
+fn entry_for(
+    def: &TableDef,
+    idx: &IndexDef,
+    row: &[Value],
+    pk_key: &[u8],
+) -> txn::Result<Option<Entry>> {
+    index::entry(&index_cols(def, idx, row), pk_key, idx.unique).map_err(idx_err)
+}
+
+/// Compute every entry of a fresh index over the existing rows, rejecting
+/// unique violations. Read-only (validation phase of a backfill).
+fn compute_backfill<B: IoBackend>(
+    ctx: &WriteCtx<'_, B>,
+    def: &TableDef,
+    data_root: PageId,
+    idx: &IndexDef,
+) -> txn::Result<Vec<Entry>> {
+    let mut entries = Vec::new();
+    let mut seen: HashSet<Vec<u8>> = HashSet::new();
+    for (pk_key, bytes) in ctx.scan(data_root, None, None)? {
+        let row = decode_padded(def, &bytes).map_err(rej)?;
+        if let Some(e) = entry_for(def, idx, &row, &pk_key)? {
+            if idx.unique && !seen.insert(e.key.clone()) {
+                return Err(rej(unique_violation(&def.name, &idx.name)));
+            }
+            btree::check_entry(&e.key, &e.value).map_err(TxnError::BTree)?;
+            entries.push(e);
+        }
+    }
+    Ok(entries)
+}
+
+/// Apply a computed backfill: build the tree and persist its root entry.
+fn apply_backfill<B: IoBackend>(
+    ctx: &mut WriteCtx<'_, B>,
+    table: &str,
+    idx: &IndexDef,
+    entries: Vec<Entry>,
+) -> txn::Result<()> {
+    let mut root = ctx.create_tree()?;
+    for e in entries {
+        root = index::insert_entry(ctx, root, &e).map_err(idx_err)?;
+    }
+    store_iroot(ctx, table, &idx.name, root)
+}
+
 // --- DDL ---------------------------------------------------------------------
 
-fn create_table<B: IoBackend>(ctx: &mut WriteCtx<'_, B>, def: TableDef) -> txn::Result<JobOut> {
+fn create_table<B: IoBackend>(ctx: &mut WriteCtx<'_, B>, mut def: TableDef) -> txn::Result<JobOut> {
+    def.materialize_implicit_indexes();
     def.validate().map_err(rej)?;
     let tbl_key = store::tbl_key(&def.name).map_err(rej)?;
     if ctx.lookup(ctx.root(), &tbl_key)?.is_some() {
@@ -150,6 +269,10 @@ fn create_table<B: IoBackend>(ctx: &mut WriteCtx<'_, B>, def: TableDef) -> txn::
             store::encode_seq(1),
         )?;
     }
+    for idx in &def.indexes {
+        let iroot = ctx.create_tree()?;
+        store_iroot(ctx, &def.name, &idx.name, iroot)?;
+    }
     Ok(JobOut::Unit)
 }
 
@@ -158,6 +281,16 @@ fn drop_table<B: IoBackend>(ctx: &mut WriteCtx<'_, B>, table: &str) -> txn::Resu
     let _ = load_table(ctx, table)?;
     let data_root = load_root(ctx, table)?;
     ctx.free_tree(data_root)?;
+
+    // Free and unlink every index tree of the table.
+    let (lo, hi) = store::iroot_band(table).map_err(rej)?;
+    for (key, bytes) in ctx.scan(ctx.root(), Some(&lo), Some(&hi))? {
+        let iroot = store::decode_root(&bytes).map_err(rej)?;
+        ctx.free_tree(iroot)?;
+        let cat = ctx.delete(ctx.root(), &key)?;
+        ctx.set_root(cat);
+    }
+
     for key in [
         store::tbl_key(table).map_err(rej)?,
         store::root_key(table).map_err(rej)?,
@@ -189,11 +322,93 @@ fn add_column<B: IoBackend>(
         }));
     }
     def.columns.push(column);
+    let known = def.indexes.len();
+    def.materialize_implicit_indexes();
     def.validate().map_err(rej)?;
 
     let bytes = encode_table(&def).map_err(rej)?;
     let tbl_key = store::tbl_key(table).map_err(rej)?;
     btree::check_entry(&tbl_key, &bytes).map_err(TxnError::BTree)?;
+
+    // Backfill any implicit unique index the new column brought (rows padded
+    // with a shared non-null default will correctly fail here).
+    let data_root = load_root(ctx, table)?;
+    let mut backfills = Vec::new();
+    for idx in &def.indexes[known..] {
+        backfills.push((idx.clone(), compute_backfill(ctx, &def, data_root, idx)?));
+    }
+
+    store_entry(ctx, tbl_key, bytes)?;
+    for (idx, entries) in backfills {
+        apply_backfill(ctx, table, &idx, entries)?;
+    }
+    Ok(JobOut::Unit)
+}
+
+fn create_index<B: IoBackend>(
+    ctx: &mut WriteCtx<'_, B>,
+    table: &str,
+    index: IndexDef,
+) -> txn::Result<JobOut> {
+    let mut def = load_table(ctx, table)?;
+    if def.index_pos(&index.name).is_some() {
+        return Err(rej(CatalogError::IndexExists {
+            table: table.to_string(),
+            index: index.name.clone(),
+        }));
+    }
+    def.indexes.push(index.clone());
+    def.validate().map_err(rej)?;
+
+    let bytes = encode_table(&def).map_err(rej)?;
+    let tbl_key = store::tbl_key(table).map_err(rej)?;
+    btree::check_entry(&tbl_key, &bytes).map_err(TxnError::BTree)?;
+
+    let data_root = load_root(ctx, table)?;
+    let entries = compute_backfill(ctx, &def, data_root, &index)?;
+
+    store_entry(ctx, tbl_key, bytes)?;
+    apply_backfill(ctx, table, &index, entries)?;
+    Ok(JobOut::Unit)
+}
+
+fn drop_index<B: IoBackend>(
+    ctx: &mut WriteCtx<'_, B>,
+    table: &str,
+    index: &str,
+) -> txn::Result<JobOut> {
+    let mut def = load_table(ctx, table)?;
+    let Some(pos) = def.index_pos(index) else {
+        return Err(rej(CatalogError::UnknownIndex {
+            table: table.to_string(),
+            index: index.to_string(),
+        }));
+    };
+    let backing = def
+        .indexes
+        .get(pos)
+        .is_some_and(|idx| def.backs_unique_column(idx));
+    if backing {
+        return Err(rej(CatalogError::InvalidSchema {
+            reason: "this index enforces a unique column and cannot be dropped".to_string(),
+        }));
+    }
+    def.indexes.remove(pos);
+
+    let iroot_key = store::iroot_key(table, index).map_err(rej)?;
+    let Some(root_bytes) = ctx.lookup(ctx.root(), &iroot_key)? else {
+        return Err(rej(CatalogError::Corrupt(
+            crate::CatalogCorruption::MissingEntry,
+        )));
+    };
+    let iroot = store::decode_root(&root_bytes).map_err(rej)?;
+
+    let bytes = encode_table(&def).map_err(rej)?;
+    let tbl_key = store::tbl_key(table).map_err(rej)?;
+
+    ctx.free_tree(iroot)?;
+    let cat = ctx.delete(ctx.root(), &iroot_key)?;
+    ctx.set_root(cat);
     store_entry(ctx, tbl_key, bytes)?;
     Ok(JobOut::Unit)
 }
@@ -208,37 +423,16 @@ fn insert<B: IoBackend>(
 ) -> txn::Result<JobOut> {
     let def = load_table(ctx, table)?;
     let mut data_root = load_root(ctx, table)?;
+    let mut index_roots = load_index_roots(ctx, &def)?;
     let has_auto = def.columns.iter().any(|c| c.auto_increment);
     let mut seq = if has_auto { load_seq(ctx, table)? } else { 0 };
     let seq_before = seq;
 
     // ---- validation (read-only) ----
-    let unique_cols: Vec<usize> = def
-        .columns
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.unique)
-        .map(|(i, _)| i)
-        .collect();
-    // Provisional scan-based UNIQUE probe (one scan for the whole batch);
-    // Phase 7's unique indexes replace it.
-    let mut taken: HashMap<usize, HashSet<Vec<u8>>> = HashMap::new();
-    if !unique_cols.is_empty() {
-        for (_, bytes) in ctx.scan(data_root, None, None)? {
-            let row = decode_padded(&def, &bytes).map_err(rej)?;
-            for &ci in &unique_cols {
-                if let Some(cell) = row.get(ci) {
-                    if !matches!(cell, Value::Null) {
-                        let enc = encode_cell(cell)?;
-                        taken.entry(ci).or_default().insert(enc);
-                    }
-                }
-            }
-        }
-    }
-
     let mut staged: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(input.len());
+    let mut staged_entries: Vec<Vec<(usize, Entry)>> = Vec::with_capacity(input.len());
     let mut staged_pks: HashSet<Vec<u8>> = HashSet::new();
+    let mut staged_unique: Vec<HashSet<Vec<u8>>> = vec![HashSet::new(); def.indexes.len()];
     let mut out_rows: Vec<Vec<Value>> = Vec::with_capacity(input.len());
     for provided in input {
         let row = build_row(env, &def, provided, &mut seq).map_err(rej)?;
@@ -250,33 +444,46 @@ fn insert<B: IoBackend>(
                 table: table.to_string(),
             }));
         }
-        for &ci in &unique_cols {
-            let Some(cell) = row.get(ci) else { continue };
-            if matches!(cell, Value::Null) {
-                continue; // NULLs never conflict under UNIQUE.
+
+        // Index entries: probe unique indexes (committed + staged this batch).
+        let mut row_entries = Vec::new();
+        for (i, idx) in def.indexes.iter().enumerate() {
+            let Some(e) = entry_for(&def, idx, &row, &pk_key)? else {
+                continue;
+            };
+            if idx.unique {
+                let committed = ctx.lookup(index_roots[i], &e.key)?.is_some();
+                if committed || !staged_unique[i].insert(e.key.clone()) {
+                    return Err(rej(unique_violation(table, &idx.name)));
+                }
             }
-            let enc = encode_cell(cell)?;
-            if !taken.entry(ci).or_default().insert(enc) {
-                return Err(rej(unique_violation(table, &def, ci)));
-            }
+            btree::check_entry(&e.key, &e.value).map_err(TxnError::BTree)?;
+            row_entries.push((i, e));
         }
 
         let bytes = encode_row(&row).map_err(|e| rej(e.into()))?;
         btree::check_entry(&pk_key, &bytes).map_err(TxnError::BTree)?;
         staged_pks.insert(pk_key.clone());
         staged.push((pk_key, bytes));
+        staged_entries.push(row_entries);
         out_rows.push(row);
     }
 
     // ---- apply ----
-    for (key, bytes) in staged {
+    for ((key, bytes), entries) in staged.into_iter().zip(staged_entries) {
         data_root = ctx.insert(data_root, &key, &bytes)?;
+        for (i, e) in entries {
+            index_roots[i] = index::insert_entry(ctx, index_roots[i], &e).map_err(idx_err)?;
+        }
     }
     store_entry(
         ctx,
         store::root_key(table).map_err(rej)?,
         store::encode_root(data_root),
     )?;
+    for (i, idx) in def.indexes.iter().enumerate() {
+        store_iroot(ctx, table, &idx.name, index_roots[i])?;
+    }
     if seq != seq_before {
         store_entry(
             ctx,
@@ -296,6 +503,7 @@ fn update<B: IoBackend>(
 ) -> txn::Result<JobOut> {
     let def = load_table(ctx, table)?;
     let mut data_root = load_root(ctx, table)?;
+    let mut index_roots = load_index_roots(ctx, &def)?;
     let pk_key = encode_pk(table, &def, pk).map_err(rej)?;
 
     // ---- validation (read-only) ----
@@ -304,9 +512,9 @@ fn update<B: IoBackend>(
             table: table.to_string(),
         }));
     };
-    let mut row = decode_padded(&def, &bytes).map_err(rej)?;
+    let old_row = decode_padded(&def, &bytes).map_err(rej)?;
+    let mut row = old_row.clone();
 
-    let mut touched_unique: Vec<usize> = Vec::new();
     for (name, value) in sets {
         let ci = def.col_index(&name).ok_or_else(|| {
             rej(CatalogError::UnknownColumn {
@@ -324,9 +532,6 @@ fn update<B: IoBackend>(
             return Err(rej(CatalogError::EngineManagedColumn { column: name }));
         }
         check_cell_type(table, &def, ci, &value).map_err(rej)?;
-        if col.unique {
-            touched_unique.push(ci);
-        }
         if let Some(slot) = row.get_mut(ci) {
             *slot = value;
         }
@@ -353,25 +558,23 @@ fn update<B: IoBackend>(
 
     run_checks(&def, &row).map_err(rej)?;
 
-    // Provisional scan-based UNIQUE probe over the changed columns, skipping
-    // this row itself.
-    for &ci in &touched_unique {
-        let Some(cell) = row.get(ci) else { continue };
-        if matches!(cell, Value::Null) {
+    // Index deltas: only entries whose key changed move; a changed unique key
+    // is probed against the index (our own entry sits at the old key, so any
+    // hit is another row's — self-exclusion falls out naturally).
+    let mut deltas: Vec<(usize, Option<Entry>, Option<Entry>)> = Vec::new();
+    for (i, idx) in def.indexes.iter().enumerate() {
+        let old_e = entry_for(&def, idx, &old_row, &pk_key)?;
+        let new_e = entry_for(&def, idx, &row, &pk_key)?;
+        if old_e.as_ref().map(|e| &e.key) == new_e.as_ref().map(|e| &e.key) {
             continue;
         }
-        let target = encode_cell(cell)?;
-        for (other_key, other_bytes) in ctx.scan(data_root, None, None)? {
-            if other_key == pk_key {
-                continue;
+        if let Some(e) = &new_e {
+            if idx.unique && ctx.lookup(index_roots[i], &e.key)?.is_some() {
+                return Err(rej(unique_violation(table, &idx.name)));
             }
-            let other = decode_padded(&def, &other_bytes).map_err(rej)?;
-            if let Some(other_cell) = other.get(ci) {
-                if !matches!(other_cell, Value::Null) && encode_cell(other_cell)? == target {
-                    return Err(rej(unique_violation(table, &def, ci)));
-                }
-            }
+            btree::check_entry(&e.key, &e.value).map_err(TxnError::BTree)?;
         }
+        deltas.push((i, old_e, new_e));
     }
 
     let new_bytes = encode_row(&row).map_err(|e| rej(e.into()))?;
@@ -379,11 +582,25 @@ fn update<B: IoBackend>(
 
     // ---- apply ----
     data_root = ctx.insert(data_root, &pk_key, &new_bytes)?;
+    let changed: Vec<usize> = deltas.iter().map(|(i, _, _)| *i).collect();
+    for (i, old_e, new_e) in deltas {
+        if let Some(e) = old_e {
+            index_roots[i] = index::remove_entry(ctx, index_roots[i], &e).map_err(idx_err)?;
+        }
+        if let Some(e) = new_e {
+            index_roots[i] = index::insert_entry(ctx, index_roots[i], &e).map_err(idx_err)?;
+        }
+    }
     store_entry(
         ctx,
         store::root_key(table).map_err(rej)?,
         store::encode_root(data_root),
     )?;
+    for i in changed {
+        if let Some(idx) = def.indexes.get(i) {
+            store_iroot(ctx, table, &idx.name, index_roots[i])?;
+        }
+    }
     Ok(JobOut::Row(row))
 }
 
@@ -394,16 +611,31 @@ fn delete<B: IoBackend>(
 ) -> txn::Result<JobOut> {
     let def = load_table(ctx, table)?;
     let mut data_root = load_root(ctx, table)?;
+    let mut index_roots = load_index_roots(ctx, &def)?;
     let pk_key = encode_pk(table, &def, pk).map_err(rej)?;
-    if ctx.lookup(data_root, &pk_key)?.is_none() {
+    let Some(bytes) = ctx.lookup(data_root, &pk_key)? else {
         return Ok(JobOut::Deleted(false));
-    }
+    };
+    let row = decode_padded(&def, &bytes).map_err(rej)?;
+
     data_root = ctx.delete(data_root, &pk_key)?;
+    let mut touched = Vec::new();
+    for (i, idx) in def.indexes.iter().enumerate() {
+        if let Some(e) = entry_for(&def, idx, &row, &pk_key)? {
+            index_roots[i] = index::remove_entry(ctx, index_roots[i], &e).map_err(idx_err)?;
+            touched.push(i);
+        }
+    }
     store_entry(
         ctx,
         store::root_key(table).map_err(rej)?,
         store::encode_root(data_root),
     )?;
+    for i in touched {
+        if let Some(idx) = def.indexes.get(i) {
+            store_iroot(ctx, table, &idx.name, index_roots[i])?;
+        }
+    }
     Ok(JobOut::Deleted(true))
 }
 
@@ -425,7 +657,9 @@ fn build_row(
                 column: name,
             });
         };
-        let col = &def.columns[ci];
+        let Some(col) = def.columns.get(ci) else {
+            continue;
+        };
         if col.rowversion || col.on_update_now {
             return Err(CatalogError::EngineManagedColumn { column: name });
         }
@@ -551,20 +785,10 @@ fn encode_pk(table: &str, def: &TableDef, pk: &[Value]) -> crate::Result<Vec<u8>
     Ok(encode_key(pk)?)
 }
 
-/// Encode one cell for unique-probe comparison (order-preserving, canonical —
-/// so e.g. all NaNs compare equal, matching the key order).
-fn encode_cell(cell: &Value) -> txn::Result<Vec<u8>> {
-    encode_key(std::slice::from_ref(cell)).map_err(|e| rej(e.into()))
-}
-
-fn unique_violation(table: &str, def: &TableDef, ci: usize) -> CatalogError {
+fn unique_violation(table: &str, index: &str) -> CatalogError {
     CatalogError::UniqueViolation {
         table: table.to_string(),
-        column: def
-            .columns
-            .get(ci)
-            .map(|c| c.name.clone())
-            .unwrap_or_default(),
+        index: index.to_string(),
     }
 }
 
