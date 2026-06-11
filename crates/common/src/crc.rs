@@ -2,7 +2,8 @@
 //!
 //! Implemented in-house rather than pulled as a dependency: it is a small,
 //! well-understood, non-security-sensitive integrity check (used to detect page
-//! corruption, not to resist tampering). See `DECISIONS.md` D3.
+//! corruption and mangled cursor tokens, not to resist tampering). See
+//! `DECISIONS.md` D3. Lives in `common` so both `pager` and `proto` share it.
 
 /// Reflected Castagnoli polynomial (0x1EDC6F41 reflected).
 const POLY: u32 = 0x82F6_3B78;
@@ -35,7 +36,7 @@ static TABLE: [u32; 256] = build_table();
 ///
 /// ```
 /// // Standard CRC32C check value for the ASCII string "123456789".
-/// assert_eq!(pager::crc32c(b"123456789"), 0xE306_9283);
+/// assert_eq!(common::crc32c(b"123456789"), 0xE306_9283);
 /// ```
 pub fn crc32c(data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;

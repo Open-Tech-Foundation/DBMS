@@ -5,6 +5,92 @@ Per `PLAN.md` §1 rule 6, every resolution of an ambiguity or deviation from
 
 ---
 
+## D23 — Phase 8 fuzzing is a seeded in-house harness; libFuzzer waits for Phase 11
+
+**Phase:** 8 · **Status:** accepted
+
+`PLAN.md` Phase 8's exit demands "fuzzer clean on adversarial input", while
+the dedicated fuzz harness (cargo-fuzz/libFuzzer) is a Phase 11 deliverable.
+Pulling `cargo-fuzz` forward would add a nightly-only toolchain and external
+deps that D4's reasoning avoids.
+
+**Decision:** Phase 8 ships a deterministic, seeded adversarial-input suite
+(`proto/tests/proto_fuzz.rs`): 100k random byte strings, 100k corpus
+mutations (bit flips, truncations, overwrites, splices), and hand-built
+hostile container shapes (depth bombs, claimed-giant containers,
+str32/bin32 length lies). Every decoded request must also survive a
+canonical re-encode/re-decode round-trip. Coverage-guided fuzzing arrives
+with Phase 11's harness; this suite stays as the fast deterministic gate.
+
+## D22 — Clause desugaring semantics: aggregates, distinct, having
+
+**Phase:** 8 · **Status:** accepted
+
+`SPEC.md` §5.4 fixes the clause order (FROM → WHERE → GROUP → HAVING →
+PROJECT → ORDER → LIMIT) but leaves three details open. The clause lowerer
+desugars into a pipeline and reuses the pipeline fold, so equivalence is by
+construction; these rules define the desugaring:
+
+- **Aggregates in the clause `select` list** become named `group` outputs:
+  the alias names the output (`{as:["spent",{sum:…}]}` → agg `spent`), an
+  unaliased aggregate gets its function name (`{count:1}` → `count`), and a
+  name collision is a typed error. v1 allows aggregates only as the *whole*
+  select item (no `{add:[{sum:x},1]}`); grouping is implied by `group_by`
+  *or* select-list aggregates.
+- **`distinct` is an IR operator** (`Plan::Distinct`), placed after PROJECT
+  and before ORDER in the clause order. `ARCHITECTURE.md` §3.7's operator
+  list omits it though the stage exists in `SPEC.md` §5.3/§11; an explicit
+  operator beats desugaring into `Aggregate`, which would entangle lowering
+  with planning. (Addition, not contradiction — flagged per rule 6.)
+- **`having` without grouping** is rejected at lowering; `{distinct:false}`
+  is an explicit no-op stage. Structural shape (pipeline starts at a `scan`,
+  later sources arrive via `join`, `group` outputs really are aggregate
+  calls) is also enforced at lowering — names/types/§6 safety stay in the
+  Phase 9 validator.
+
+## D21 — Protocol version field and cursor-token envelope
+
+**Phase:** 8 · **Status:** accepted
+
+`PLAN.md` Phase 8 requires a protocol version field and a keyset cursor
+token; `SPEC.md` §5's grammar shows neither a version nor the token's bytes.
+
+**Decision:**
+- **Version:** requests may carry a top-level `v` (int). Missing means
+  version 1; any other value is a typed `UnsupportedVersion` error. Results
+  always carry `v:1`. Error results are `{v, ok:false, code, error}` with
+  `code` the stable `SPEC.md` §9 category identifier (the shape §5.6 leaves
+  implicit for the failure case).
+- **Cursor token:** opaque bytes `[version 0x01][crc32c(payload) BE][payload]`.
+  The payload (keyset position) is defined with the executor in Phase 9; the
+  envelope is fixed now so a truncated or mangled token is a clean
+  `Validation` error instead of a nonsense seek. CRC32C moved from `pager`
+  to `common` (same in-house routine, D3) so `proto` shares it without
+  depending on storage crates.
+
+## D20 — Two-stage hardened decode: bytes → bounded Doc tree → AST
+
+**Phase:** 8 · **Status:** accepted
+
+`ARCHITECTURE.md` §6 requires limits enforced *before* allocating and no
+unbounded recursion, but does not fix the decoder's architecture.
+
+**Decision:** decoding is two stages. A small hardened reader produces a
+generic `Doc` tree (null/bool/int/float/str/bin/array/map) under
+`DecodeLimits` — max message size (checked before reading), max depth
+(explicit counter), max node count (budget charged per node; container item
+counts are validated against both the remaining bytes and the remaining
+budget before any `Vec` allocation). It rejects the reserved byte `0xC1`,
+ext types, non-string and duplicate map keys, invalid UTF-8, ints outside
+`i64`, and trailing bytes. The AST mapping then works on the already-safe
+tree and enforces the grammar (unknown ops/stages/expressions/fields are
+typed errors). Defaults: 1 MiB / depth 64 (matching `types::MAX_JSON_DEPTH`)
+/ 100k nodes, embedder-configurable per `SPEC.md` §8. The node cap bounds
+the intermediate tree's memory, so the two-stage shape costs nothing
+adversarially and keeps all byte-level hardening in one ~200-line module.
+Insert-row values that are containers become `json` values (re-encoded
+canonical MessagePack), matching §5.5's `data:{role:"admin"}` example.
+
 ## D19 — Reclamation only runs inside a committing batch
 
 **Phase:** 7 · **Status:** accepted (bug fix of Phase 4 behavior)

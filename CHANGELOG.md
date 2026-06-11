@@ -8,6 +8,48 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 
 ## [Unreleased]
 
+### Phase 8 — Query protocol, surfaces & IR
+
+#### Added
+- `proto`: the hardened wire layer — MessagePack bytes ⇄ a bounded `Doc`
+  tree under `DecodeLimits` (max message size checked up front, max depth
+  via explicit counter, max node count charged before any allocation);
+  rejects the reserved byte `0xC1`, ext types, non-string/duplicate map
+  keys, invalid UTF-8, over-`i64` ints, and trailing bytes (`DECISIONS.md`
+  D20).
+- `proto`: the typed query AST for **both surfaces** — pipeline stages
+  (scan/match/join/group/sort/project/distinct/limit/cursor) and the clause
+  form (from/joins/where/group_by/having/order_by/select/distinct/limit/
+  offset/cursor) — the full §5.2 expression grammar, and DML
+  (insert/update/delete/transaction/explain) with faithful selector
+  decoding (`where`/`{all:true}`/absent) for the Phase 9 validator.
+- `proto`: strict grammar enforcement at decode — unknown ops, stages,
+  expression nodes, and fields are typed `Validation` errors (queries are
+  data, never code); plus the canonical AST → wire encoding (decode ∘
+  encode = identity).
+- `proto`: protocol versioning — optional request `v` (missing = 1, other
+  values rejected); results always carry `v:1` (`DECISIONS.md` D21).
+- `proto`: the logical-plan IR (`Plan`): Scan, IndexScan (planner-only),
+  Filter, Join, Aggregate, Project, Distinct, Sort, Limit, Cursor.
+- `proto`: result encoding per `SPEC.md` §5.6 (`{v, ok, columns, rows,
+  cursor, applied, affected}`), the error-result shape (`{v, ok:false,
+  code, error}` with the §9 category as `code`), and the opaque cursor-token
+  envelope `[version][crc32c][payload]` with tamper rejection.
+- `query`: surface → IR lowering — the pipeline folds directly into a
+  `Plan`; the clause form desugars into its fixed-order pipeline and reuses
+  the same fold, making clause↔pipeline equivalence true by construction;
+  select-list aggregates become named `group` outputs (`DECISIONS.md` D22).
+- Exit-criteria tests: decode round-trips for every grammar node; oversized/
+  over-deep/over-budget messages rejected; a seeded 200k-input adversarial
+  fuzz suite over the decoder (random bytes + corpus mutations + hostile
+  container shapes, `DECISIONS.md` D23); clause↔pipeline equivalence on the
+  SPEC worked example plus 2 000 random generated pairs.
+
+#### Changed
+- `common`: gained the in-house CRC32C routine; `pager` now re-exports it
+  (`pager::crc32c` unchanged for callers) so `proto` can checksum cursor
+  tokens without depending on storage crates.
+
 ### Phase 7 — Indexing
 
 #### Added

@@ -19,7 +19,6 @@
 //! ```
 
 mod cache;
-mod crc;
 mod freelist;
 mod meta;
 mod page;
@@ -27,7 +26,7 @@ mod pager;
 
 use common::{CategorizedError, ErrorCategory};
 
-pub use crc::crc32c;
+pub use common::crc32c;
 pub use meta::Meta;
 pub use page::{Frame, PageType, HEADER_SIZE, PAGE_PAYLOAD_SIZE, PAGE_SIZE};
 pub use pager::{Pager, PagerStats, DEFAULT_CACHE_BYTES};

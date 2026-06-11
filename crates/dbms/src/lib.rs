@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn protocol_malformed_is_validation() {
-        let err: Error = proto::ProtoError::Malformed.into();
+        let err: Error = proto::ProtoError::Truncated.into();
         assert_eq!(err.category(), ErrorCategory::Validation);
     }
 

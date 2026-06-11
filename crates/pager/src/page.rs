@@ -105,7 +105,7 @@ pub fn page_id(frame: &Frame) -> u64 {
 pub fn verify(bytes: &[u8], expected: PageId) -> Result<&Frame> {
     let frame = as_frame(bytes, expected)?;
     let stored = read_u32(frame, CRC_OFF);
-    let computed = crate::crc::crc32c(&frame[TYPE_OFF..]);
+    let computed = common::crc32c(&frame[TYPE_OFF..]);
     if stored != computed {
         return Err(corrupt(CorruptionKind::Checksum {
             page: expected.get(),
@@ -129,7 +129,7 @@ pub fn finalize(frame: &mut Frame, page_type: PageType, id: PageId) {
     frame[6] = 0;
     frame[7] = 0;
     write_u64(frame, ID_OFF, id.get());
-    let crc = crate::crc::crc32c(&frame[TYPE_OFF..]);
+    let crc = common::crc32c(&frame[TYPE_OFF..]);
     write_u32(frame, CRC_OFF, crc);
 }
 
@@ -203,7 +203,7 @@ mod tests {
         finalize(&mut frame, PageType::Data, PageId::new(2));
         frame[TYPE_OFF] = 99;
         // Re-checksum so the type byte is what fails, not the CRC.
-        let crc = crate::crc::crc32c(&frame[TYPE_OFF..]);
+        let crc = common::crc32c(&frame[TYPE_OFF..]);
         write_u32(&mut frame, CRC_OFF, crc);
         let verified = verify(&frame[..], PageId::new(2)).unwrap();
         assert!(matches!(
