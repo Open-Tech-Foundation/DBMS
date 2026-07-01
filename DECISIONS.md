@@ -5,6 +5,32 @@ Per `PLAN.md` §1 rule 6, every resolution of an ambiguity or deviation from
 
 ---
 
+## D25 — Runtime evaluation errors map to `Validation`; `f64` follows IEEE
+
+**Phase:** 9 · **Status:** accepted
+
+`SPEC.md` §8 requires checked arithmetic ("overflow is a typed error, never
+wraparound or panic") but §9's category list has no arithmetic/runtime bucket.
+The scalar evaluator's failures — integer overflow, integer division/modulo by
+zero, and out-of-range/unrepresentable casts — are data-dependent runtime
+faults of an otherwise-valid, validated query.
+
+**Decision:**
+
+- These map to **`Validation`**: the closest fit (the operation is invalid for
+  this row), and it keeps the §9 taxonomy fixed rather than inventing a
+  category. `EvalError` is a single crate-local enum, so a future v1.x can
+  reclassify in one place if a dedicated category is added.
+- **Integer** arithmetic is checked (`checked_add`/`sub`/`mul`/`div`/`rem`);
+  overflow and `/0`,`%0` are typed errors. **`f64`** arithmetic follows
+  IEEE-754: division by zero yields `±inf` and overflow saturates to `inf`
+  rather than erroring — matching the value model, which already admits inf/NaN
+  as ordinary `f64` values (`DECISIONS.md` D12). Only integer money-style math
+  is guarded, which is the §8 concern.
+- Mixed `i64`/`f64` **comparison** and **arithmetic** coerce the integer to
+  `f64` (the validator permits the mix); comparison is by numeric value, not by
+  the variant-rank order `Value` uses cross-type.
+
 ## D24 — Post-group visibility, guard detection, and the validator's boundary
 
 **Phase:** 9 · **Status:** accepted

@@ -10,11 +10,13 @@
 //! operators), write path (guarded read-check-write, optimistic version), and
 //! EXPLAIN follow.
 
+mod eval;
 mod lower;
 mod validate;
 
 use common::{CategorizedError, ErrorCategory};
 
+pub use eval::{eval, eval_predicate, BoundColumn, EvalError, Shape};
 pub use lower::{lower, LowerError};
 pub use validate::{
     validate, validate_select, OutputColumn, OutputSchema, SchemaView, ValidateError, Validated,
@@ -33,6 +35,9 @@ pub enum QueryError {
     /// A request that fails validation (names, types, `SPEC.md` §6 rules).
     #[error(transparent)]
     Validate(#[from] ValidateError),
+    /// A runtime expression-evaluation failure (overflow, div-by-zero, cast).
+    #[error(transparent)]
+    Eval(#[from] EvalError),
     /// An error from the catalog layer.
     #[error(transparent)]
     Catalog(#[from] catalog::CatalogError),
@@ -50,6 +55,7 @@ impl CategorizedError for QueryError {
             QueryError::Proto(e) => e.category(),
             QueryError::Lower(e) => e.category(),
             QueryError::Validate(e) => e.category(),
+            QueryError::Eval(e) => e.category(),
             QueryError::Catalog(e) => e.category(),
             QueryError::Index(e) => e.category(),
             QueryError::Txn(e) => e.category(),

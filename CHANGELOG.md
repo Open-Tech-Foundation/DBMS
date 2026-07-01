@@ -43,6 +43,14 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 - `DECISIONS.md` D24: post-group column visibility, conservative guard
   detection, and the validator ↔ write-path (`Validation` vs `Constraint`)
   boundary.
+- `query`: the scalar **expression evaluator** (`eval` / `eval_predicate`) — a
+  pure `Expr` → `Value` function shared by the executor and write path. SQL
+  three-valued logic (a `null` operand propagates to `null`; only a `true`
+  predicate keeps a row), checked `i64` arithmetic (overflow and `/0`,`%0` are
+  typed `EvalError`s, `SPEC.md` §8) with IEEE `f64`, value-based mixed numeric
+  comparison, `between`/`in`, a `%`/`_` `like`/`ilike` matcher, `coalesce`/
+  `nullif`, and casts; a `Shape` binds column references to row positions.
+  `DECISIONS.md` D25 records the runtime-error category and the `f64` policy.
 
 ### Phase 8 — Query protocol, surfaces & IR
 
