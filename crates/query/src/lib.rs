@@ -11,12 +11,14 @@
 //! EXPLAIN follow.
 
 mod eval;
+mod exec;
 mod lower;
 mod validate;
 
 use common::{CategorizedError, ErrorCategory};
 
 pub use eval::{eval, eval_predicate, BoundColumn, EvalError, Shape};
+pub use exec::{execute as execute_reference, ExecError, Relation};
 pub use lower::{lower, LowerError};
 pub use validate::{
     validate, validate_select, OutputColumn, OutputSchema, SchemaView, ValidateError, Validated,
@@ -38,6 +40,9 @@ pub enum QueryError {
     /// A runtime expression-evaluation failure (overflow, div-by-zero, cast).
     #[error(transparent)]
     Eval(#[from] EvalError),
+    /// An error executing a plan.
+    #[error(transparent)]
+    Exec(#[from] ExecError),
     /// An error from the catalog layer.
     #[error(transparent)]
     Catalog(#[from] catalog::CatalogError),
@@ -56,6 +61,7 @@ impl CategorizedError for QueryError {
             QueryError::Lower(e) => e.category(),
             QueryError::Validate(e) => e.category(),
             QueryError::Eval(e) => e.category(),
+            QueryError::Exec(e) => e.category(),
             QueryError::Catalog(e) => e.category(),
             QueryError::Index(e) => e.category(),
             QueryError::Txn(e) => e.category(),

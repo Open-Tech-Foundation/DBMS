@@ -470,8 +470,9 @@ fn check_plan<S: SchemaView>(plan: &Plan, schema: &S) -> Result<RowType> {
 }
 
 /// The output label of an unaliased projection item: the referenced column's
-/// name, or a positional `col{n}` label for a computed expression.
-fn output_name(expr: &Expr, index: usize) -> String {
+/// name, or a positional `col{n}` label for a computed expression. Shared with
+/// the executor so validation and execution agree on output labels.
+pub(crate) fn output_name(expr: &Expr, index: usize) -> String {
     match expr {
         Expr::Column { column, .. } => column.clone(),
         _ => format!("col{}", index + 1),

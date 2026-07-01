@@ -51,6 +51,15 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
   comparison, `between`/`in`, a `%`/`_` `like`/`ilike` matcher, `coalesce`/
   `nullif`, and casts; a `Shape` binds column references to row positions.
   `DECISIONS.md` D25 records the runtime-error category and the `f64` policy.
+- `query`: the **reference executor** (`execute_reference`) — a brute-force,
+  fully-materializing interpreter of the logical plan over a `CatSnapshot`:
+  base/index scan (an `IndexScan` returns the same rows as scan+filter),
+  nested-loop INNER/LEFT/CROSS join, filter, group + aggregates (count/sum/
+  min/max/avg, checked `i64` sum, global-aggregate-over-empty), HAVING, sort
+  (multi-key, asc/desc, nulls-first), distinct, and limit/offset. It is the
+  oracle for the pull-based executor and the first end-to-end read path
+  (cursor/keyset pagination lands with that executor). 12 integration tests,
+  incl. pipeline↔clause result-equivalence on a join+group+having query.
 
 ### Phase 8 — Query protocol, surfaces & IR
 

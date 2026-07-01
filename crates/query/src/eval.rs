@@ -287,10 +287,11 @@ fn eval_cmp(op: CmpOp, a: &Value, b: &Value) -> Value {
     })
 }
 
-/// The ordering of two non-null values for comparison: the two numeric kinds
-/// compare by value (coerced through `f64`), everything else by the engine's
-/// logical order.
-fn value_order(a: &Value, b: &Value) -> Ordering {
+/// The ordering of two values for comparison and sorting: the two numeric
+/// kinds compare by value (coerced through `f64`), everything else by the
+/// engine's logical order (which places `null` first). Shared with the
+/// executor's sort/min/max so ordering is defined in one place.
+pub(crate) fn value_order(a: &Value, b: &Value) -> Ordering {
     match (a, b) {
         (Value::I64(x), Value::F64(y)) => f64_order(*x as f64, *y),
         (Value::F64(x), Value::I64(y)) => f64_order(*x, *y as f64),
