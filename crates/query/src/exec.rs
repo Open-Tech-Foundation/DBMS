@@ -42,8 +42,14 @@ pub enum ExecError {
     /// A storage/schema error reading the snapshot.
     #[error(transparent)]
     Catalog(#[from] CatalogError),
-    /// A plan node the reference executor does not run yet.
-    #[error("the reference executor does not support {feature} yet")]
+    /// A value/encoding error (e.g. encoding a cursor token's keyset).
+    #[error(transparent)]
+    Type(#[from] types::TypeError),
+    /// A cursor token that is malformed, tampered, or used without an order.
+    #[error("malformed or unusable cursor token")]
+    BadCursor,
+    /// A plan node the executor does not run yet.
+    #[error("the executor does not support {feature} yet")]
     Unsupported {
         /// The unsupported feature.
         feature: &'static str,
@@ -55,7 +61,10 @@ impl common::CategorizedError for ExecError {
         match self {
             ExecError::Eval(e) => e.category(),
             ExecError::Catalog(e) => e.category(),
-            ExecError::Unsupported { .. } => common::ErrorCategory::Validation,
+            ExecError::Type(e) => e.category(),
+            ExecError::BadCursor | ExecError::Unsupported { .. } => {
+                common::ErrorCategory::Validation
+            }
         }
     }
 }
@@ -109,7 +118,7 @@ pub fn execute<B: IoBackend>(plan: &Plan, snap: &CatSnapshot<B>) -> Result<Relat
 
 /// A base-table scan; when `index` is set, rows are filtered to an equality
 /// prefix on the indexed columns — the same rows a real index seek returns.
-fn scan<B: IoBackend>(
+pub(crate) fn scan<B: IoBackend>(
     snap: &CatSnapshot<B>,
     table: &str,
     alias: Option<&str>,
@@ -181,7 +190,11 @@ fn join<B: IoBackend>(
 /// Group rows and compute aggregates. The output row type is the input columns
 /// (pass-through, `DECISIONS.md` D24) followed by the named aggregate outputs;
 /// each group's pass-through values come from its first row.
-fn aggregate(input: &Relation, by: &[Expr], aggs: &[(String, Expr)]) -> Result<Relation> {
+pub(crate) fn aggregate(
+    input: &Relation,
+    by: &[Expr],
+    aggs: &[(String, Expr)],
+) -> Result<Relation> {
     let mut shape = input.shape.clone();
     for (name, _) in aggs {
         shape.push(None, name.clone());
@@ -296,7 +309,7 @@ fn as_f64(v: &Value) -> f64 {
     }
 }
 
-fn project(input: &Relation, items: &[Projection]) -> Result<Relation> {
+pub(crate) fn project(input: &Relation, items: &[Projection]) -> Result<Relation> {
     let mut shape = Shape::new();
     for (i, item) in items.iter().enumerate() {
         let name = match item {
@@ -319,7 +332,7 @@ fn project(input: &Relation, items: &[Projection]) -> Result<Relation> {
     Ok(Relation { shape, rows })
 }
 
-fn distinct(input: Relation) -> Relation {
+pub(crate) fn distinct(input: Relation) -> Relation {
     let mut seen: Vec<Vec<Value>> = Vec::new();
     for row in input.rows {
         if !seen.contains(&row) {
@@ -332,7 +345,7 @@ fn distinct(input: Relation) -> Relation {
     }
 }
 
-fn sort(input: Relation, keys: &[proto::SortKey]) -> Result<Relation> {
+pub(crate) fn sort(input: Relation, keys: &[proto::SortKey]) -> Result<Relation> {
     // Pre-evaluate the sort keys once per row, then sort — keeps evaluation
     // (which can fail) out of the comparator.
     let mut keyed: Vec<(Vec<Value>, Vec<Value>)> = Vec::with_capacity(input.rows.len());

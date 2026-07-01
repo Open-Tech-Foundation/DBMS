@@ -22,9 +22,9 @@ use types::Value;
 
 use catalog::Catalog;
 
-use crate::exec::execute;
 use crate::lower::lower;
 use crate::plan::{plan, render_plan};
+use crate::stream::execute_page;
 use crate::validate::validate;
 use crate::write::{execute_write, recover_batch, write_spec};
 use crate::QueryError;
@@ -74,10 +74,13 @@ fn run_select<B: IoBackend>(
     snap: &catalog::CatSnapshot<B>,
 ) -> Result<QueryResult, QueryError> {
     let physical = plan(&lower(select)?, snap)?;
-    let rel = execute(&physical, snap)?;
+    // The streaming executor applies keyset pagination and returns a
+    // continuation token when more rows remain.
+    let page = execute_page(&physical, snap)?;
     Ok(QueryResult {
-        columns: rel.shape.cols.iter().map(|c| c.name.clone()).collect(),
-        rows: rel.rows,
+        columns: page.shape.cols.iter().map(|c| c.name.clone()).collect(),
+        rows: page.rows,
+        cursor: page.cursor,
         ..QueryResult::default()
     })
 }

@@ -5,6 +5,37 @@ Per `PLAN.md` §1 rule 6, every resolution of an ambiguity or deviation from
 
 ---
 
+## D26 — Streaming executor reuses blocking ops; keyset pagination is a top pass
+
+**Phase:** 9 · **Status:** accepted
+
+`PLAN.md` Phase 9 wants a pull-based executor checked against the brute-force
+reference executor, plus keyset cursor pagination (§7.4). Two edges to fix.
+
+- **What "pull-based" duplicates.** The streaming executor implements the
+  *streamable* operators (scan, filter, project, nested-loop join, limit) as
+  composable row iterators — the pull model, where a `Limit` over an unsorted
+  scan stops early. The inherently **blocking** operators (sort, aggregate,
+  distinct) buffer their input and **reuse the reference executor's tested
+  computation** rather than a second copy — exactly the split a Volcano engine
+  makes, and it keeps the group/sort/agg semantics (`DECISIONS.md` D24)
+  single-sourced. The equivalence test (`streaming == reference`) therefore
+  validates the streaming *plumbing*, which is where streaming-only bugs live.
+
+- **Pagination is a top-level pass, not an operator.** Lowering nests the page
+  stages as `Cursor{ Limit{ Sort{…} } }` (matching the SPEC §5.3 example), but
+  a keyset seek must *resume then page*. Rather than force a planner reorder,
+  `execute_page` peels **both** `Limit` and `Cursor` off the plan top (either
+  nesting means the same thing) and applies: run the ordered core → drop rows
+  up to the resume key → offset/limit → emit a continuation token from the last
+  row's sort key when more remain. The token is the sort-key values as an
+  `encode_row` payload under the existing tamper-checked envelope
+  (`proto::encode_cursor_token`). Keyset resume assumes the **trailing sort key
+  is unique** (else equal-key boundary rows can skip/dup — the standard keyset
+  caveat; append a unique column). Within one pinned snapshot no row is skipped
+  or duplicated; holding a snapshot **across** pages for full §7.4 stability is
+  the cursor-owns-its-snapshot public API of Phase 10 (`ARCHITECTURE.md` §3.9).
+
 ## D25 — Runtime evaluation errors map to `Validation`; `f64` follows IEEE
 
 **Phase:** 9 · **Status:** accepted

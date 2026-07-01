@@ -8,7 +8,7 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 
 ## [Unreleased]
 
-### Phase 9 — Validator (in progress)
+### Phase 9 — Validator, planner, executor & write path
 
 #### Added
 - `query`: the **validator** (`validate` / `validate_select`) — the layer
@@ -97,6 +97,21 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
   request and encodes a `SPEC.md` §5.6 result — or a typed `{ok:false, code,
   error}` on failure. 8 end-to-end tests, incl. atomic transaction commit and
   rollback-on-duplicate-PK, and the wire round-trip.
+- `query`: the **pull-based (streaming) executor** (`execute_stream` /
+  `execute_page`) — the streamable operators (scan, filter, project,
+  nested-loop join, limit) compose as row iterators that pull on demand (an
+  unsorted `Limit` stops early), while the blocking operators (sort, aggregate,
+  distinct) buffer and reuse the reference executor's computation. Checked for
+  **result-equivalence against the reference executor** over random
+  data/queries (the exit criterion). Now the engine's read path.
+- `query`: **keyset cursor pagination** (acceptance scenario 4) — `execute_page`
+  peels a top-level `Limit`/`Cursor`, resumes past the cursor's sort key, pages,
+  and emits a continuation token (the last row's sort key as an `encode_row`
+  payload under the tamper-checked envelope) when more rows remain. Within a
+  pinned snapshot, paging visits every row exactly once, in order; a mangled
+  token is a clean `Validation` error. `DECISIONS.md` D26 records the
+  reference/streaming split and the pagination pass (held-snapshot cross-page
+  stability is the Phase 10 cursor API).
 
 ### Phase 8 — Query protocol, surfaces & IR
 

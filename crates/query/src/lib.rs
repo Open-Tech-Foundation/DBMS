@@ -15,6 +15,7 @@ mod eval;
 mod exec;
 mod lower;
 mod plan;
+mod stream;
 mod validate;
 mod write;
 
@@ -25,6 +26,7 @@ pub use eval::{eval, eval_predicate, BoundColumn, EvalError, Shape};
 pub use exec::{execute as execute_reference, ExecError, Relation};
 pub use lower::{lower, LowerError};
 pub use plan::{explain, plan, render_plan};
+pub use stream::{execute_page, execute_stream, Page};
 pub use validate::{
     validate, validate_select, OutputColumn, OutputSchema, SchemaView, ValidateError, Validated,
 };
