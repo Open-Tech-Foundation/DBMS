@@ -5,6 +5,45 @@ Per `PLAN.md` §1 rule 6, every resolution of an ambiguity or deviation from
 
 ---
 
+## D27 — Public API shape: a cursor owns its snapshot; DDL sits on `Database`
+
+**Phase:** 10 · **Status:** accepted
+
+`PLAN.md` Phase 10 asks for a "small, misuse-resistant" embedded API where
+"cursors own their snapshot and release on drop". Three shaping calls.
+
+- **Cursor cross-page stability = holding one `CatSnapshot`.** A `Cursor`
+  captures `Catalog::snapshot()` at open and pages over it for its whole life;
+  the pinned snapshot holds its version live against reclamation (the txn
+  registry), so a concurrent writer's inserts/updates/deletes never perturb the
+  walk — this is exactly acceptance scenario 4, which Phase 9 deferred to this
+  layer ([[phase9-status]], D26). Each `fetch` rebuilds `Limit { Cursor { base } }`
+  around the once-planned physical plan and calls the existing `execute_page`;
+  no new pagination engine. The paged select must **end in a sort** (keyset
+  resume is by the trailing sort key), documented on `open_cursor`. Release is
+  automatic: dropping the cursor drops the snapshot.
+
+- **DDL lives on `Database`, not in the request protocol.** `proto::Request`
+  is DML + query + transaction only (no `create table`), matching the wire
+  protocol. But an embedded library must create schema, so `Database` exposes
+  typed DDL (`create_table`/`drop_table`/`add_column`/`create_index`/
+  `drop_index`) delegating straight to the catalog, alongside `execute`
+  (wire-shaped requests) and `execute_wire` (bytes-in/out). This keeps the
+  transport surface minimal while the in-process surface is complete.
+
+- **Result decoding separates null from mistake.** `Row`'s typed accessors
+  return `Result<Option<T>, DecodeError>`: `Ok(None)` is a genuine SQL null,
+  while an unknown column or a type mismatch is a typed `Validation`-category
+  error rather than a silently-swallowed `None`. Reading a result wrong is a
+  caller bug and should surface as one.
+
+The file tools (`Database::check`, `Database::inspect`, and the `otf-dbms
+check|inspect <file>` CLI) run entirely over the existing pager + snapshot
+validators; `check` reads every live page, so a corrupted page trips its
+checksum and surfaces as `Corruption`.
+
+---
+
 ## D26 — Streaming executor reuses blocking ops; keyset pagination is a top pass
 
 **Phase:** 9 · **Status:** accepted

@@ -24,5 +24,8 @@ proto.workspace = true
 query.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+common.workspace = true
+
 [lints]
 workspace = true

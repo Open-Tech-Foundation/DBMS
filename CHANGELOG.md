@@ -8,6 +8,40 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 
 ## [Unreleased]
 
+### Phase 10 — Public API & tools
+
+#### Added
+- `otf-dbms`: the **public embedded API** — `Database` wraps the engine behind
+  a small, hard-to-misuse surface (`ARCHITECTURE.md` §4):
+  - **Open/create** — `create`/`open` (file-backed, unix), `create_memory`
+    (in-RAM), and `create_with`/`open_with` (injected `Clock`/`Rng` for
+    deterministic simulation); `create` rejects a non-empty file.
+  - **DDL** — `create_table`/`drop_table`/`add_column`/`create_index`/
+    `drop_index` delegating to the catalog (DDL is out of the wire protocol; D27).
+  - **Execute** — `execute(&Request)` (validated select/explain/write/txn →
+    `Response`), `transaction(ops)`, and `execute_wire(&[u8])` (bytes-in/out).
+  - **Cursor** — `open_cursor(select, page_size)` returns a `Cursor` that
+    **owns a pinned snapshot** and pages an ordered query with keyset tokens;
+    the snapshot is held until the cursor drops, giving cross-page stability
+    under a concurrent writer (acceptance scenario 4; D27).
+  - **Result decoding** — `Response`/`Row` with by-name access and typed
+    accessors (`get_i64`/`get_f64`/`get_bool`/`get_text`) that separate null
+    (`Ok(None)`) from an unknown-column/type-mismatch `DecodeError`.
+  - **Tools** — `check` (full integrity check: pager invariants + every tree +
+    each index cross-checked, surfacing a corrupt page as `Corruption`) and
+    `inspect` (structural summary: storage stats + per-table row/index counts).
+  - `Error` gains `Io`, `Decode`, and `Usage` variants, each mapped to its
+    `SPEC.md` §9 category.
+- `cli`: `otf-dbms check|inspect <file>` — read-only file tools over the API.
+- Tests: doc-examples on every significant public item (compile + run); an
+  open→write→reopen→read file round-trip (scenario 1); an integrity check that
+  flags an intentionally corrupted file; and a snapshot-owning cursor paging a
+  stable view while a concurrent writer inserts/updates/deletes (scenario 4).
+
+#### Changed
+- `dbms` crate: promoted from the Phase 1 error-aggregation scaffold to the
+  full public API; `cli` from a placeholder to the file-tools binary.
+
 ### Phase 9 — Validator, planner, executor & write path
 
 #### Added
