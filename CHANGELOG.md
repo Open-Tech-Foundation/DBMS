@@ -60,6 +60,21 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
   oracle for the pull-based executor and the first end-to-end read path
   (cursor/keyset pagination lands with that executor). 12 integration tests,
   incl. pipeline↔clause result-equivalence on a join+group+having query.
+- `catalog`: **conditional multi-row writes** — `update_where` / `delete_where`
+  driven by a caller-supplied `RowUpdater` / `RowFilter` policy that the
+  catalog runs against **live committed rows inside the single writer**
+  (`SPEC.md` §6 rule 3), the mechanism that serializes guarded read-check-write
+  and gives first-committer-wins. Validate-then-apply with full CHECK / index
+  maintenance, including in-batch unique-key swaps; a new `CatalogError::Policy`
+  preserves the policy's typed error and §9 category across the writer thread.
+- `query`: the **write path** (`execute_write`) — inserts map to the catalog's
+  atomic `insert_many`; updates/deletes build a policy from the validated AST
+  and the scalar evaluator, so relative (`balance - x`), guarded, and
+  version-optimistic updates evaluate against live state; returns the `SPEC.md`
+  §5.6 `applied`/`affected` outcome. Tests: the **bank scenario** (§7.5) run
+  200× under a barrier (exactly one of two concurrent withdrawals commits, no
+  overdraft, CHECK always holds), optimistic first-committer-wins, relative
+  debit, conditional delete, and guarded-blind-set rejection at validation.
 
 ### Phase 8 — Query protocol, surfaces & IR
 

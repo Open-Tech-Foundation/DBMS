@@ -61,6 +61,18 @@ pub(crate) enum JobOp {
         table: String,
         pk: Vec<Value>,
     },
+    /// A conditional update whose selector and set values are evaluated against
+    /// live rows in the writer (the query layer's guarded/relative/optimistic
+    /// update path).
+    UpdateWhere {
+        table: String,
+        policy: Box<dyn crate::RowUpdater>,
+    },
+    /// A conditional delete whose selector is evaluated against live rows.
+    DeleteWhere {
+        table: String,
+        filter: Box<dyn crate::RowFilter>,
+    },
 }
 
 /// A catalog job's output, delivered after durable commit.
@@ -72,6 +84,8 @@ pub(crate) enum JobOut {
     Row(Vec<Value>),
     /// Whether the delete removed a row.
     Deleted(bool),
+    /// The number of rows changed by a conditional update/delete.
+    Affected(u64),
 }
 
 impl<B: IoBackend> WriteJob<B> for CatalogJob {
@@ -87,6 +101,10 @@ impl<B: IoBackend> WriteJob<B> for CatalogJob {
             JobOp::Insert { table, rows } => insert(&self.env, ctx, &table, rows),
             JobOp::Update { table, pk, sets } => update(&self.env, ctx, &table, &pk, sets),
             JobOp::Delete { table, pk } => delete(ctx, &table, &pk),
+            JobOp::UpdateWhere { table, policy } => {
+                update_where(&self.env, ctx, &table, policy.as_ref())
+            }
+            JobOp::DeleteWhere { table, filter } => delete_where(ctx, &table, filter.as_ref()),
         }
     }
 }
@@ -513,49 +531,7 @@ fn update<B: IoBackend>(
         }));
     };
     let old_row = decode_padded(&def, &bytes).map_err(rej)?;
-    let mut row = old_row.clone();
-
-    for (name, value) in sets {
-        let ci = def.col_index(&name).ok_or_else(|| {
-            rej(CatalogError::UnknownColumn {
-                table: table.to_string(),
-                column: name.clone(),
-            })
-        })?;
-        let Some(col) = def.columns.get(ci) else {
-            continue;
-        };
-        if def.is_pk(ci) {
-            return Err(rej(CatalogError::PkImmutable { column: name }));
-        }
-        if col.rowversion || col.on_update_now {
-            return Err(rej(CatalogError::EngineManagedColumn { column: name }));
-        }
-        check_cell_type(table, &def, ci, &value).map_err(rej)?;
-        if let Some(slot) = row.get_mut(ci) {
-            *slot = value;
-        }
-    }
-
-    // Engine-managed bumps.
-    let now = Value::Timestamp(env.clock.now_micros());
-    for (ci, col) in def.columns.iter().enumerate() {
-        if col.rowversion {
-            let next = match row.get(ci) {
-                Some(Value::I64(v)) => v.saturating_add(1),
-                _ => 1,
-            };
-            if let Some(slot) = row.get_mut(ci) {
-                *slot = Value::I64(next);
-            }
-        }
-        if col.on_update_now {
-            if let Some(slot) = row.get_mut(ci) {
-                *slot = now.clone();
-            }
-        }
-    }
-
+    let row = transform_row(env, table, &def, &old_row, sets)?;
     run_checks(&def, &row).map_err(rej)?;
 
     // Index deltas: only entries whose key changed move; a changed unique key
@@ -637,6 +613,219 @@ fn delete<B: IoBackend>(
         }
     }
     Ok(JobOut::Deleted(true))
+}
+
+/// Apply an absolute `sets` list to a copy of `old_row`, then run the
+/// engine-managed bumps (rowversion +1, `on_update: now`). Rejects writes to
+/// primary-key and engine-managed columns and type-checks each set cell. The
+/// query validator enforces these statically too; this is the durable
+/// last-line check against a raw catalog caller.
+fn transform_row(
+    env: &Env,
+    table: &str,
+    def: &TableDef,
+    old_row: &[Value],
+    sets: Vec<(String, Value)>,
+) -> txn::Result<Vec<Value>> {
+    let mut row = old_row.to_vec();
+    for (name, value) in sets {
+        let ci = def.col_index(&name).ok_or_else(|| {
+            rej(CatalogError::UnknownColumn {
+                table: table.to_string(),
+                column: name.clone(),
+            })
+        })?;
+        let Some(col) = def.columns.get(ci) else {
+            continue;
+        };
+        if def.is_pk(ci) {
+            return Err(rej(CatalogError::PkImmutable { column: name }));
+        }
+        if col.rowversion || col.on_update_now {
+            return Err(rej(CatalogError::EngineManagedColumn { column: name }));
+        }
+        check_cell_type(table, def, ci, &value).map_err(rej)?;
+        if let Some(slot) = row.get_mut(ci) {
+            *slot = value;
+        }
+    }
+
+    let now = Value::Timestamp(env.clock.now_micros());
+    for (ci, col) in def.columns.iter().enumerate() {
+        if col.rowversion {
+            let next = match row.get(ci) {
+                Some(Value::I64(v)) => v.saturating_add(1),
+                _ => 1,
+            };
+            if let Some(slot) = row.get_mut(ci) {
+                *slot = Value::I64(next);
+            }
+        }
+        if col.on_update_now {
+            if let Some(slot) = row.get_mut(ci) {
+                *slot = now.clone();
+            }
+        }
+    }
+    Ok(row)
+}
+
+/// A conditional multi-row update (`SPEC.md` §6 rule 3): the caller's policy is
+/// evaluated against **live committed rows inside the writer**, so the
+/// read → condition-check → write is one atomic step no client can split —
+/// this is what makes guarded and version-guarded updates safe. Returns the
+/// number of rows changed. Validate-then-apply: every matched row's new form,
+/// CHECK, and unique-index deltas are computed before the first mutation.
+fn update_where<B: IoBackend>(
+    env: &Env,
+    ctx: &mut WriteCtx<'_, B>,
+    table: &str,
+    policy: &dyn crate::RowUpdater,
+) -> txn::Result<JobOut> {
+    let def = load_table(ctx, table)?;
+    let mut data_root = load_root(ctx, table)?;
+    let mut index_roots = load_index_roots(ctx, &def)?;
+
+    // ---- validation (read-only) ----
+    // Per matched row: (pk_key, new row bytes, per-index (old,new) deltas).
+    type RowDelta = (Vec<u8>, Vec<u8>, Vec<(usize, Option<Entry>, Option<Entry>)>);
+    let mut matched: Vec<RowDelta> = Vec::new();
+    // Track, per unique index, the old keys leaving and the new keys arriving
+    // this batch, so an in-batch swap of a unique value is not a false clash.
+    let mut removed: Vec<HashSet<Vec<u8>>> = vec![HashSet::new(); def.indexes.len()];
+    let mut added: Vec<HashSet<Vec<u8>>> = vec![HashSet::new(); def.indexes.len()];
+
+    for (pk_key, bytes) in ctx.scan(data_root, None, None)? {
+        let old_row = decode_padded(&def, &bytes).map_err(rej)?;
+        if !policy.matches(&def, &old_row).map_err(TxnError::Rejected)? {
+            continue;
+        }
+        let sets = policy
+            .new_values(&def, &old_row)
+            .map_err(TxnError::Rejected)?;
+        let row = transform_row(env, table, &def, &old_row, sets)?;
+        run_checks(&def, &row).map_err(rej)?;
+
+        let mut deltas = Vec::new();
+        for (i, idx) in def.indexes.iter().enumerate() {
+            let old_e = entry_for(&def, idx, &old_row, &pk_key)?;
+            let new_e = entry_for(&def, idx, &row, &pk_key)?;
+            if old_e.as_ref().map(|e| &e.key) == new_e.as_ref().map(|e| &e.key) {
+                continue;
+            }
+            if let Some(e) = &old_e {
+                removed[i].insert(e.key.clone());
+            }
+            if let Some(e) = &new_e {
+                btree::check_entry(&e.key, &e.value).map_err(TxnError::BTree)?;
+                if idx.unique && !added[i].insert(e.key.clone()) {
+                    // Two rows in this batch would take the same unique key.
+                    return Err(rej(unique_violation(table, &idx.name)));
+                }
+            }
+            deltas.push((i, old_e, new_e));
+        }
+
+        let new_bytes = encode_row(&row).map_err(|e| rej(e.into()))?;
+        btree::check_entry(&pk_key, &new_bytes).map_err(TxnError::BTree)?;
+        matched.push((pk_key, new_bytes, deltas));
+    }
+
+    // A new unique key that hits a committed entry is a violation *unless* that
+    // entry is one this batch is removing (a value moving between rows).
+    for (i, idx) in def.indexes.iter().enumerate() {
+        if !idx.unique {
+            continue;
+        }
+        for key in &added[i] {
+            if ctx.lookup(index_roots[i], key)?.is_some() && !removed[i].contains(key) {
+                return Err(rej(unique_violation(table, &idx.name)));
+            }
+        }
+    }
+
+    // ---- apply ----
+    let affected = matched.len() as u64;
+    let mut touched: HashSet<usize> = HashSet::new();
+    for (pk_key, new_bytes, deltas) in matched {
+        data_root = ctx.insert(data_root, &pk_key, &new_bytes)?;
+        for (i, old_e, new_e) in deltas {
+            if let Some(e) = old_e {
+                index_roots[i] = index::remove_entry(ctx, index_roots[i], &e).map_err(idx_err)?;
+            }
+            if let Some(e) = new_e {
+                index_roots[i] = index::insert_entry(ctx, index_roots[i], &e).map_err(idx_err)?;
+            }
+            touched.insert(i);
+        }
+    }
+    if affected > 0 {
+        store_entry(
+            ctx,
+            store::root_key(table).map_err(rej)?,
+            store::encode_root(data_root),
+        )?;
+        for i in touched {
+            if let Some(idx) = def.indexes.get(i) {
+                store_iroot(ctx, table, &idx.name, index_roots[i])?;
+            }
+        }
+    }
+    Ok(JobOut::Affected(affected))
+}
+
+/// A conditional multi-row delete: the caller's filter runs against live rows
+/// in the writer. Returns the number of rows removed.
+fn delete_where<B: IoBackend>(
+    ctx: &mut WriteCtx<'_, B>,
+    table: &str,
+    filter: &dyn crate::RowFilter,
+) -> txn::Result<JobOut> {
+    let def = load_table(ctx, table)?;
+    let mut data_root = load_root(ctx, table)?;
+    let mut index_roots = load_index_roots(ctx, &def)?;
+
+    // ---- validation (read-only): collect the doomed rows and their entries.
+    // Per matched row: its PK key and the (index, entry) pairs to remove.
+    type Doomed = (Vec<u8>, Vec<(usize, Entry)>);
+    let mut matched: Vec<Doomed> = Vec::new();
+    for (pk_key, bytes) in ctx.scan(data_root, None, None)? {
+        let row = decode_padded(&def, &bytes).map_err(rej)?;
+        if !filter.matches(&def, &row).map_err(TxnError::Rejected)? {
+            continue;
+        }
+        let mut entries = Vec::new();
+        for (i, idx) in def.indexes.iter().enumerate() {
+            if let Some(e) = entry_for(&def, idx, &row, &pk_key)? {
+                entries.push((i, e));
+            }
+        }
+        matched.push((pk_key, entries));
+    }
+
+    // ---- apply ----
+    let affected = matched.len() as u64;
+    let mut touched: HashSet<usize> = HashSet::new();
+    for (pk_key, entries) in matched {
+        data_root = ctx.delete(data_root, &pk_key)?;
+        for (i, e) in entries {
+            index_roots[i] = index::remove_entry(ctx, index_roots[i], &e).map_err(idx_err)?;
+            touched.insert(i);
+        }
+    }
+    if affected > 0 {
+        store_entry(
+            ctx,
+            store::root_key(table).map_err(rej)?,
+            store::encode_root(data_root),
+        )?;
+        for i in touched {
+            if let Some(idx) = def.indexes.get(i) {
+                store_iroot(ctx, table, &idx.name, index_roots[i])?;
+            }
+        }
+    }
+    Ok(JobOut::Affected(affected))
 }
 
 // --- row construction & checks ----------------------------------------------

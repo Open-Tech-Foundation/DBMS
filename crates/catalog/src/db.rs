@@ -9,6 +9,7 @@ use types::{UuidV7Gen, Value};
 
 use crate::codec::decode_table;
 use crate::job::{decode_padded, CatalogJob, Env, JobOp, JobOut};
+use crate::policy::{RowFilter, RowUpdater};
 use crate::schema::{ColumnDef, IndexDef, TableDef};
 use crate::store;
 use crate::{CatalogCorruption, CatalogError, Result};
@@ -161,6 +162,32 @@ impl<B: IoBackend + 'static> Catalog<B> {
         }
     }
 
+    /// Conditionally update every row a `policy` matches, evaluating both the
+    /// selector and the new values against **live committed rows in the
+    /// writer** (`SPEC.md` §6 rule 3). Returns the number of rows changed.
+    /// This is the query layer's guarded/relative/optimistic update path.
+    pub fn update_where(&self, table: &str, policy: Box<dyn RowUpdater>) -> Result<u64> {
+        match self.submit(JobOp::UpdateWhere {
+            table: table.to_string(),
+            policy,
+        })? {
+            JobOut::Affected(n) => Ok(n),
+            _ => Err(internal("unexpected update_where output")),
+        }
+    }
+
+    /// Conditionally delete every row a `filter` matches (evaluated against
+    /// live rows in the writer). Returns the number of rows removed.
+    pub fn delete_where(&self, table: &str, filter: Box<dyn RowFilter>) -> Result<u64> {
+        match self.submit(JobOp::DeleteWhere {
+            table: table.to_string(),
+            filter,
+        })? {
+            JobOut::Affected(n) => Ok(n),
+            _ => Err(internal("unexpected delete_where output")),
+        }
+    }
+
     /// Pin a consistent snapshot of schema **and** data.
     pub fn snapshot(&self) -> CatSnapshot<B> {
         CatSnapshot {
@@ -303,10 +330,14 @@ impl<B: IoBackend> CatSnapshot<B> {
 fn from_txn(err: TxnError) -> CatalogError {
     match err {
         TxnError::Rejected(inner) => {
+            // Capture the category before erasing the `CategorizedError` bound;
+            // a rejection that isn't ours is kept typed under `Policy` so its
+            // category flows and a higher layer can downcast it further.
+            let category = inner.category();
             let any: Box<dyn std::error::Error + Send + Sync> = inner;
             match any.downcast::<CatalogError>() {
                 Ok(ours) => *ours,
-                Err(other) => internal(&format!("foreign rejection: {other}")),
+                Err(source) => CatalogError::Policy { category, source },
             }
         }
         other => CatalogError::Txn(other),

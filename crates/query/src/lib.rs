@@ -14,6 +14,7 @@ mod eval;
 mod exec;
 mod lower;
 mod validate;
+mod write;
 
 use common::{CategorizedError, ErrorCategory};
 
@@ -23,6 +24,7 @@ pub use lower::{lower, LowerError};
 pub use validate::{
     validate, validate_select, OutputColumn, OutputSchema, SchemaView, ValidateError, Validated,
 };
+pub use write::{execute_write, WriteOutcome};
 
 /// Errors raised by the query layer.
 #[derive(Debug, thiserror::Error)]

@@ -38,6 +38,7 @@
 mod codec;
 mod db;
 mod job;
+mod policy;
 mod schema;
 mod store;
 
@@ -45,6 +46,7 @@ use common::{CategorizedError, ErrorCategory};
 use types::TypeKind;
 
 pub use db::{CatSnapshot, Catalog};
+pub use policy::{PolicyError, RowFilter, RowUpdater};
 pub use schema::{
     implicit_index_name, CheckExpr, CmpOp, ColumnDef, DefaultSpec, IndexDef, TableDef, UpdatePolicy,
 };
@@ -234,6 +236,16 @@ pub enum CatalogError {
         /// Which check (by definition order).
         index: usize,
     },
+    /// A rejection raised by a caller-supplied write policy (e.g. the query
+    /// layer's expression evaluator). Its taxonomy category is preserved; a
+    /// higher layer can downcast `source` to recover the original typed error.
+    #[error("{source}")]
+    Policy {
+        /// The category the policy reported.
+        category: ErrorCategory,
+        /// The boxed original error.
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 impl CategorizedError for CatalogError {
@@ -259,6 +271,7 @@ impl CategorizedError for CatalogError {
             | CatalogError::DuplicateKey { .. }
             | CatalogError::UniqueViolation { .. }
             | CatalogError::CheckViolation { .. } => ErrorCategory::Constraint,
+            CatalogError::Policy { category, .. } => *category,
         }
     }
 }
