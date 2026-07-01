@@ -1,17 +1,24 @@
 //! `query` — surface lowering, validator, planner, executor, write path.
 //!
-//! Phase 8 delivers the surface → IR [`lower`]ing: both surface forms fold
+//! Phase 8 delivered the surface → IR [`lower`]ing: both surface forms fold
 //! into one logical-plan tree (the clause form desugars into its fixed-order
-//! pipeline first, so equivalence is by construction). The validator (names,
-//! types, `SPEC.md` §6 safety rules), planner (index/join/stage choices),
-//! executor (pull-based operators), write path (guarded read-check-write,
-//! optimistic version), and EXPLAIN follow in Phase 9.
+//! pipeline first, so equivalence is by construction).
+//!
+//! Phase 9 adds the [`validate`]or: name resolution, expression type-checking,
+//! and `SPEC.md` §6 safety-rule enforcement over the IR (reads) and DML AST
+//! (writes). The planner (index/join/stage choices), executor (pull-based
+//! operators), write path (guarded read-check-write, optimistic version), and
+//! EXPLAIN follow.
 
 mod lower;
+mod validate;
 
 use common::{CategorizedError, ErrorCategory};
 
 pub use lower::{lower, LowerError};
+pub use validate::{
+    validate, validate_select, OutputColumn, OutputSchema, SchemaView, ValidateError, Validated,
+};
 
 /// Errors raised by the query layer.
 #[derive(Debug, thiserror::Error)]
@@ -23,6 +30,9 @@ pub enum QueryError {
     /// A select that does not lower into the IR.
     #[error(transparent)]
     Lower(#[from] LowerError),
+    /// A request that fails validation (names, types, `SPEC.md` §6 rules).
+    #[error(transparent)]
+    Validate(#[from] ValidateError),
     /// An error from the catalog layer.
     #[error(transparent)]
     Catalog(#[from] catalog::CatalogError),
@@ -39,6 +49,7 @@ impl CategorizedError for QueryError {
         match self {
             QueryError::Proto(e) => e.category(),
             QueryError::Lower(e) => e.category(),
+            QueryError::Validate(e) => e.category(),
             QueryError::Catalog(e) => e.category(),
             QueryError::Index(e) => e.category(),
             QueryError::Txn(e) => e.category(),

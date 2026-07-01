@@ -5,6 +5,42 @@ Per `PLAN.md` §1 rule 6, every resolution of an ambiguity or deviation from
 
 ---
 
+## D24 — Post-group visibility, guard detection, and the validator's boundary
+
+**Phase:** 9 · **Status:** accepted
+
+`SPEC.md` §5/§6 fix the validator's job but leave three edges open; the Phase 9
+validator resolves them as follows.
+
+- **Base columns stay visible after a `group`.** The `SPEC.md` §5.3 worked
+  example projects `{col:["u","name"]}` *after* grouping only by `u.id` — a
+  column that is neither a group key nor an aggregate. Standard SQL rejects
+  that; this engine (like SQLite/MySQL's extended `GROUP BY`) allows it. So an
+  `Aggregate` node's output row type is **the input columns (pass-through) plus
+  the named aggregate outputs**, not just the keys. Raw aggregate expressions
+  (`{sum:x}`) remain valid *only* as named group outputs; anywhere else (a
+  later `match`, `project`, `sort`, or join `on`) they are an
+  `AggregateNotAllowed` validation error — reference the named output instead.
+  This matches the clause lowerer (D22), which already rewrites select-list
+  aggregates into named outputs.
+
+- **Guard detection for §6 rule 2 is conservative.** An absolute set to a
+  `guarded` column is admitted when the `where` carries a "guard/version
+  condition": a comparison on a `guarded` or `rowversion` column. The scan
+  credits such predicates under a top-level `and` and inside `cmp/between/in`,
+  but **not** under `or`/`not`, where a guard could be weakened away. A false
+  negative only over-rejects (the caller makes the update relative or
+  version-guarded); it never lets a genuine blind set through. `unconditional:
+  true` never rescues a guarded column — that flag is for `free` columns only.
+
+- **Validator vs. write path.** The validator owns everything
+  `Validation`-category: names, expression types, and the §6 safety rules
+  (including engine-managed / PK-immutable writes, which `SPEC.md` §9 and the
+  catalog both class as `Validation`). It does **not** re-check live
+  `Constraint`-category rules — NOT NULL, UNIQUE, CHECK, required-column
+  presence, and insert value typing stay in the write path against committed
+  data, so the two layers never duplicate (and cannot diverge on) enforcement.
+
 ## D23 — Phase 8 fuzzing is a seeded in-house harness; libFuzzer waits for Phase 11
 
 **Phase:** 8 · **Status:** accepted

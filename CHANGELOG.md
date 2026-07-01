@@ -8,6 +8,42 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 
 ## [Unreleased]
 
+### Phase 9 — Validator (in progress)
+
+#### Added
+- `query`: the **validator** (`validate` / `validate_select`) — the layer
+  between lowering and the planner that makes a well-formed query safe to
+  plan and execute against a concrete schema (`ARCHITECTURE.md` §3.8):
+  - **Name resolution** over the IR — a `RowType` (the columns visible at
+    each operator) threads up the `Plan` tree; column refs resolve
+    qualified/unqualified, with typed unknown/ambiguous errors; a select
+    returns its `OutputSchema` (labels + kinds + nullability) for `SPEC.md`
+    §5.6 `columns` and EXPLAIN.
+  - **Expression type-checking** (`SPEC.md` §3/§5.2) — comparisons over
+    compatible kinds (equal, or the two numeric kinds; `null` is a wildcard),
+    numeric arithmetic with `f64` contagion, boolean predicates, text-only
+    `like`, `coalesce`/`nullif` kind unification, `cast`, and `json` treated
+    as opaque (rejected from comparison/`between`/`in`/`order by`/`group
+    by`/`cast`); LEFT-join right side made nullable; aggregate result kinds
+    (count→i64, sum/min/max→arg, avg→f64) with aggregates valid only as named
+    group outputs.
+  - **`SPEC.md` §6 safety rules** for writes — mandatory row selector
+    (rule 1); a `guarded` column may not take a blind absolute set (rule 2),
+    admitted only via a relative expression or a conservatively-detected
+    guard/version predicate, never via `unconditional:true`; engine-managed
+    (`rowversion`/`on_update: now`) and primary-key columns rejected;
+    `set`-expression assignability checked against the column.
+  - A `SchemaView` schema-source abstraction (implemented for
+    `catalog::CatSnapshot`, backed by a map in tests) and the typed,
+    `Validation`-category `ValidateError`; `QueryError` gains a `Validate`
+    variant.
+- Tests: 24 unit cases (in-memory schema) plus a live-`CatSnapshot`
+  integration suite (bank-scenario guarded update, blind-set/missing-selector
+  rejection, output schema).
+- `DECISIONS.md` D24: post-group column visibility, conservative guard
+  detection, and the validator ↔ write-path (`Validation` vs `Constraint`)
+  boundary.
+
 ### Phase 8 — Query protocol, surfaces & IR
 
 #### Added
