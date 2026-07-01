@@ -75,6 +75,16 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
   200× under a barrier (exactly one of two concurrent withdrawals commits, no
   overdraft, CHECK always holds), optimistic first-committer-wins, relative
   debit, conditional delete, and guarded-blind-set rejection at validation.
+- `query`: the rule-based **planner** (`plan`) and **EXPLAIN** (`explain` /
+  `render_plan`, `SPEC.md` §5.7). Two semantics-preserving rewrites of the
+  logical plan: **index selection** (a `Filter` of equalities over a `Scan`
+  becomes an `IndexScan` on the longest covered secondary-index prefix, with a
+  residual filter for the rest — acceptance scenario 2) and **filter
+  pushdown** (conjuncts of a `Filter` over an INNER/CROSS `Join` pushed to the
+  side they reference, enabling a further index; skipped across LEFT joins to
+  preserve null semantics). EXPLAIN renders the physical plan as an indented
+  operator tree. 6 tests, incl. the invariant that the **planned** plan
+  executes to exactly the reference executor's rows.
 
 ### Phase 8 — Query protocol, surfaces & IR
 

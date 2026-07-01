@@ -13,6 +13,7 @@
 mod eval;
 mod exec;
 mod lower;
+mod plan;
 mod validate;
 mod write;
 
@@ -21,6 +22,7 @@ use common::{CategorizedError, ErrorCategory};
 pub use eval::{eval, eval_predicate, BoundColumn, EvalError, Shape};
 pub use exec::{execute as execute_reference, ExecError, Relation};
 pub use lower::{lower, LowerError};
+pub use plan::{explain, plan, render_plan};
 pub use validate::{
     validate, validate_select, OutputColumn, OutputSchema, SchemaView, ValidateError, Validated,
 };

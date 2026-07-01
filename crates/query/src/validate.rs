@@ -469,6 +469,15 @@ fn check_plan<S: SchemaView>(plan: &Plan, schema: &S) -> Result<RowType> {
     }
 }
 
+/// The output label of a projection item — its alias, else the label its
+/// expression yields. Shared with the executor and planner so all agree.
+pub(crate) fn output_name_of(item: &Projection, index: usize) -> String {
+    match item {
+        Projection::Aliased { name, .. } => name.clone(),
+        Projection::Expr(expr) => output_name(expr, index),
+    }
+}
+
 /// The output label of an unaliased projection item: the referenced column's
 /// name, or a positional `col{n}` label for a computed expression. Shared with
 /// the executor so validation and execution agree on output labels.
