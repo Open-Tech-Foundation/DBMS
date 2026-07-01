@@ -10,6 +10,7 @@
 //! operators), write path (guarded read-check-write, optimistic version), and
 //! EXPLAIN follow.
 
+mod engine;
 mod eval;
 mod exec;
 mod lower;
@@ -19,6 +20,7 @@ mod write;
 
 use common::{CategorizedError, ErrorCategory};
 
+pub use engine::{execute_query, execute_wire};
 pub use eval::{eval, eval_predicate, BoundColumn, EvalError, Shape};
 pub use exec::{execute as execute_reference, ExecError, Relation};
 pub use lower::{lower, LowerError};

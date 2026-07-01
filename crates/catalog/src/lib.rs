@@ -46,7 +46,7 @@ use common::{CategorizedError, ErrorCategory};
 use types::TypeKind;
 
 pub use db::{CatSnapshot, Catalog};
-pub use policy::{PolicyError, RowFilter, RowUpdater};
+pub use policy::{PolicyError, RowFilter, RowUpdater, WriteSpec};
 pub use schema::{
     implicit_index_name, CheckExpr, CmpOp, ColumnDef, DefaultSpec, IndexDef, TableDef, UpdatePolicy,
 };

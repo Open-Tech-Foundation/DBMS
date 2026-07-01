@@ -85,6 +85,18 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
   preserve null semantics). EXPLAIN renders the physical plan as an indented
   operator tree. 6 tests, incl. the invariant that the **planned** plan
   executes to exactly the reference executor's rows.
+- `catalog`: **atomic multi-op transactions** — `write_batch` runs a sequence
+  of `WriteSpec`s (insert / conditional update / conditional delete) as one
+  writer transaction; each op sees the previous ops' effects and any failure
+  rejects the whole batch.
+- `query`: the **top-level engine** (`execute_query` / `execute_wire`) — the
+  full `ARCHITECTURE.md` §4 journey: validate → (read: lower → plan → execute →
+  `columns`/`rows`) / (explain: plan → text tree) / (write: run in the writer →
+  `applied`/`affected`) / (transaction: validate all, commit as one atomic
+  batch). `execute_wire` is the bytes-in/bytes-out seam that decodes a hardened
+  request and encodes a `SPEC.md` §5.6 result — or a typed `{ok:false, code,
+  error}` on failure. 8 end-to-end tests, incl. atomic transaction commit and
+  rollback-on-duplicate-PK, and the wire round-trip.
 
 ### Phase 8 — Query protocol, surfaces & IR
 

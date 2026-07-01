@@ -9,7 +9,7 @@ use types::{UuidV7Gen, Value};
 
 use crate::codec::decode_table;
 use crate::job::{decode_padded, CatalogJob, Env, JobOp, JobOut};
-use crate::policy::{RowFilter, RowUpdater};
+use crate::policy::{RowFilter, RowUpdater, WriteSpec};
 use crate::schema::{ColumnDef, IndexDef, TableDef};
 use crate::store;
 use crate::{CatalogCorruption, CatalogError, Result};
@@ -185,6 +185,16 @@ impl<B: IoBackend + 'static> Catalog<B> {
         })? {
             JobOut::Affected(n) => Ok(n),
             _ => Err(internal("unexpected delete_where output")),
+        }
+    }
+
+    /// Run a sequence of writes as **one atomic transaction** — the whole batch
+    /// commits together or not at all. Returns the per-op affected counts, in
+    /// order. This is the query layer's `op:transaction` path.
+    pub fn write_batch(&self, specs: Vec<WriteSpec>) -> Result<Vec<u64>> {
+        match self.submit(JobOp::Batch(specs))? {
+            JobOut::Batch(counts) => Ok(counts),
+            _ => Err(internal("unexpected batch output")),
         }
     }
 

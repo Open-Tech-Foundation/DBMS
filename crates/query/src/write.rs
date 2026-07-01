@@ -17,7 +17,7 @@ use common::IoBackend;
 use proto::{Delete, Expr, Insert, Request, Selector, Update};
 use types::Value;
 
-use catalog::{Catalog, CatalogError, PolicyError, RowFilter, RowUpdater, TableDef};
+use catalog::{Catalog, CatalogError, PolicyError, RowFilter, RowUpdater, TableDef, WriteSpec};
 
 use crate::eval::{eval, eval_predicate, Shape};
 use crate::QueryError;
@@ -89,6 +89,36 @@ fn run_delete<B: IoBackend + 'static>(
         applied: Some(affected > 0),
         affected,
     })
+}
+
+/// Build the catalog [`WriteSpec`] for one write request (for atomic multi-op
+/// transactions). Returns `None` for a non-write request.
+pub(crate) fn write_spec(request: &Request) -> Option<WriteSpec> {
+    match request {
+        Request::Insert(insert) => Some(WriteSpec::Insert {
+            table: insert.table.clone(),
+            rows: insert.rows.clone(),
+        }),
+        Request::Update(update) => Some(WriteSpec::Update {
+            table: update.table.clone(),
+            policy: Box::new(UpdatePolicy {
+                selector: update.selector.clone(),
+                set: update.set.clone(),
+            }),
+        }),
+        Request::Delete(delete) => Some(WriteSpec::Delete {
+            table: delete.table.clone(),
+            filter: Box::new(SelectorPolicy {
+                selector: delete.selector.clone(),
+            }),
+        }),
+        _ => None,
+    }
+}
+
+/// Map a batch (`write_batch`) rejection back to a typed query error.
+pub(crate) fn recover_batch(err: CatalogError) -> QueryError {
+    recover(err)
 }
 
 /// Recover a policy rejection back into a typed query error: a `CatalogError::

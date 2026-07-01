@@ -38,3 +38,30 @@ pub trait RowUpdater: RowFilter {
         row: &[Value],
     ) -> Result<Vec<(String, Value)>, PolicyError>;
 }
+
+/// One write within an atomic multi-op transaction
+/// ([`Catalog::write_batch`](crate::Catalog::write_batch)). The whole batch
+/// commits as a single writer transaction — all or nothing.
+pub enum WriteSpec {
+    /// Insert rows (named columns; defaults/generators fill the rest).
+    Insert {
+        /// The target table.
+        table: String,
+        /// The rows to insert.
+        rows: Vec<Vec<(String, Value)>>,
+    },
+    /// Conditionally update the rows a policy matches.
+    Update {
+        /// The target table.
+        table: String,
+        /// The update policy.
+        policy: Box<dyn RowUpdater>,
+    },
+    /// Conditionally delete the rows a filter matches.
+    Delete {
+        /// The target table.
+        table: String,
+        /// The delete filter.
+        filter: Box<dyn RowFilter>,
+    },
+}

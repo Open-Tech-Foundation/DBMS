@@ -73,6 +73,9 @@ pub(crate) enum JobOp {
         table: String,
         filter: Box<dyn crate::RowFilter>,
     },
+    /// An atomic multi-op transaction: a sequence of writes committed as one
+    /// writer transaction (all or nothing).
+    Batch(Vec<crate::WriteSpec>),
 }
 
 /// A catalog job's output, delivered after durable commit.
@@ -86,6 +89,8 @@ pub(crate) enum JobOut {
     Deleted(bool),
     /// The number of rows changed by a conditional update/delete.
     Affected(u64),
+    /// The per-op affected counts of a batch, in order.
+    Batch(Vec<u64>),
 }
 
 impl<B: IoBackend> WriteJob<B> for CatalogJob {
@@ -105,8 +110,42 @@ impl<B: IoBackend> WriteJob<B> for CatalogJob {
                 update_where(&self.env, ctx, &table, policy.as_ref())
             }
             JobOp::DeleteWhere { table, filter } => delete_where(ctx, &table, filter.as_ref()),
+            JobOp::Batch(specs) => batch(&self.env, ctx, specs),
         }
     }
+}
+
+/// Run a sequence of writes as one atomic transaction: each op sees the
+/// previous ops' effects (they thread through the evolving published root), and
+/// any failure rejects the whole batch.
+fn batch<B: IoBackend>(
+    env: &Env,
+    ctx: &mut WriteCtx<'_, B>,
+    specs: Vec<crate::WriteSpec>,
+) -> txn::Result<JobOut> {
+    let mut counts = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let affected = match spec {
+            crate::WriteSpec::Insert { table, rows } => match insert(env, ctx, &table, rows)? {
+                JobOut::Rows(rows) => rows.len() as u64,
+                _ => 0,
+            },
+            crate::WriteSpec::Update { table, policy } => {
+                match update_where(env, ctx, &table, policy.as_ref())? {
+                    JobOut::Affected(n) => n,
+                    _ => 0,
+                }
+            }
+            crate::WriteSpec::Delete { table, filter } => {
+                match delete_where(ctx, &table, filter.as_ref())? {
+                    JobOut::Affected(n) => n,
+                    _ => 0,
+                }
+            }
+        };
+        counts.push(affected);
+    }
+    Ok(JobOut::Batch(counts))
 }
 
 /// Wrap a catalog error as a transaction rejection. (If its category is
