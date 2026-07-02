@@ -5,7 +5,7 @@ Per `PLAN.md` §1 rule 6, every resolution of an ambiguity or deviation from
 
 ---
 
-## D32 — Foreign keys: `on_delete` RESTRICT/CASCADE/SET NULL via a read-only closure planner; `on_update` cascades deferred
+## D32 — Foreign keys: RESTRICT/CASCADE/SET NULL on both `on_delete` and `on_update`, via a read-only closure planner
 
 **Phase:** v2 schema power (`PLAN.md` §8.2) · **Status:** accepted
 
@@ -19,34 +19,38 @@ columns are therefore required at DDL time to be the parent's PK or a unique
 index. `MATCH SIMPLE` (a NULL in any referencing column skips the check) matches
 the row encoding's existing NULL-in-unique-index handling.
 
-**Decision:** `on_delete` supports **RESTRICT**, **CASCADE**, and **SET NULL**.
-To keep the no-op-on-reject guarantee across a multi-table, possibly cyclic
-cascade, the referenced side runs in three read-only phases before any mutation:
-(1) `plan_cascade` builds the full closure of doomed rows (CASCADE, recursive)
-and rewritten rows (SET NULL), following only CASCADE/SET NULL edges; (2)
+**Decision:** both `on_delete` and `on_update` support **RESTRICT**, **CASCADE**,
+and **SET NULL**. To keep the no-op-on-reject guarantee across a multi-table,
+possibly cyclic closure, the referenced side runs in three read-only phases
+before any mutation: (1) `plan_cascade` builds the full closure of doomed rows
+(CASCADE delete, recursive) and rewritten rows (SET NULL, or CASCADE rewrite to a
+changed parent key), following only CASCADE/SET NULL edges; (2)
 `check_cascade_restrict` rejects if any *surviving* child still references a
 disappearing key through a RESTRICT edge; (3) `validate_cascade_rewrites`
-re-checks every SET NULL row against its own CHECK / NOT NULL / UNIQUE (across the
-whole closure). Only then does `apply_cascade` delete and rewrite with full
-secondary-index upkeep. Termination holds: each row is recorded at most once, and
-`on_update` is RESTRICT-only so rewrites spawn no further deletes.
+re-checks every rewritten row against its own CHECK / NOT NULL / UNIQUE (across
+the whole closure). Only then does `apply_cascade` delete and rewrite with full
+secondary-index upkeep. A delete seeds the closure with delete-effects
+(`on_delete`); an update that changes a referenced key seeds it with key-change
+effects (`on_update`), while the parent row itself is written by the normal
+update path. Termination holds: each row is recorded at most once.
 
-**`on_update` CASCADE / SET NULL are deferred** (rejected at DDL): PKs are
-immutable, so `on_update` only fires for a key referencing an *updatable* `UNIQUE`
-non-PK column — a niche — and a cascading key change could have to move a child's
-own primary key (which v1 forbids, `PkImmutable`). The actions remain modelled
-(`RefAction`) and persisted in the catalog record, so enabling them later needs
-no on-disk change. (The engine is pre-release, so the stored format evolves in
-place behind its single version byte — no legacy-decode paths are carried.)
+**One `on_update` restriction stays** (rejected at DDL): an `on_update` CASCADE
+whose referencing columns are part of the *child's* primary key would have to
+move the child's key, and v1 keeps primary keys immutable (`PkImmutable`). This
+is niche — `on_update` fires only when a referenced *updatable* `UNIQUE` non-PK
+key changes, and such a key is rarely also part of the child PK — so it is
+rejected rather than supported via a delete+reinsert re-key.
 
-**Alternatives rejected:** (a) applying cascades eagerly row-by-row, which would
-break the no-op guarantee when a downstream RESTRICT or SET-NULL-violates-CHECK is
-hit mid-cascade; (b) requiring no DDL constraint on the parent columns, which
-would make every child existence probe O(n) instead of O(log n).
+**Alternatives rejected:** (a) applying the closure eagerly row-by-row, which
+would break the no-op guarantee when a downstream RESTRICT or a rewrite-violates-
+CHECK/UNIQUE is hit mid-closure; (b) requiring no DDL constraint on the parent
+columns, which would make every child existence probe O(n) instead of O(log n).
 
 **Known v1 limitation:** the referenced side finds child rows by scanning the
 child table; an index on the referencing columns (to make it O(log n)) is a
-tracked optimization, not yet built.
+tracked optimization, not yet built. (The engine is pre-release, so the catalog
+record format still evolves in place behind its single version byte — no
+legacy-decode paths.)
 
 ---
 

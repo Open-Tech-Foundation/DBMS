@@ -107,17 +107,18 @@ fn fk_column_type_must_match_the_parent() {
 }
 
 #[test]
-fn on_update_cascade_is_not_yet_supported() {
+fn on_update_cascade_cannot_move_a_primary_key() {
     let (cat, _b) = new_catalog();
     cat.create_table(users()).unwrap();
-    // on_delete CASCADE is accepted; on_update CASCADE is not yet.
+    // `author` is part of the PK, so an on_update CASCADE would move the row's
+    // key — rejected at DDL (primary keys are immutable in v1).
     let bad = TableDef::new(
         "posts",
         vec![
             ColumnDef::new("id", TypeKind::I64),
             ColumnDef::new("author", TypeKind::I64),
         ],
-        vec!["id"],
+        vec!["id", "author"],
     )
     .foreign_key(
         ForeignKey::new("fk", vec!["author"], "users", vec!["id"]).on_update(RefAction::Cascade),
@@ -720,6 +721,89 @@ fn changing_a_referenced_unique_key_is_restricted() {
         matches!(err, CatalogError::ReferencedByChildren { .. }),
         "{err:?}"
     );
+}
+
+/// `tags` keyed by id but referenced through UNIQUE `slug`, and `hits.slug` →
+/// `tags.slug` with the given `on_update` action.
+fn seed_tags_and_hits(cat: &Catalog<Backend>, action: RefAction) {
+    cat.create_table(TableDef::new(
+        "tags",
+        vec![
+            ColumnDef::new("id", TypeKind::I64),
+            ColumnDef::new("slug", TypeKind::Text).unique(),
+        ],
+        vec!["id"],
+    ))
+    .unwrap();
+    cat.create_table(
+        TableDef::new(
+            "hits",
+            vec![
+                ColumnDef::new("id", TypeKind::I64),
+                ColumnDef::new("slug", TypeKind::Text),
+            ],
+            vec!["id"],
+        )
+        .foreign_key(
+            ForeignKey::new("fk_slug", vec!["slug"], "tags", vec!["slug"]).on_update(action),
+        ),
+    )
+    .unwrap();
+    cat.insert(
+        "tags",
+        row(&[("id", Value::I64(1)), ("slug", Value::Text("rust".into()))]),
+    )
+    .unwrap();
+    for id in [1, 2] {
+        cat.insert(
+            "hits",
+            row(&[("id", Value::I64(id)), ("slug", Value::Text("rust".into()))]),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn on_update_cascade_renames_children() {
+    let (cat, _b) = new_catalog();
+    seed_tags_and_hits(&cat, RefAction::Cascade);
+
+    // Rename the referenced slug; both children follow.
+    cat.update(
+        "tags",
+        vec![Value::I64(1)],
+        row(&[("slug", Value::Text("rustlang".into()))]),
+    )
+    .unwrap();
+    let snap = cat.snapshot();
+    for id in [1, 2] {
+        assert_eq!(
+            snap.get("hits", &[Value::I64(id)]).unwrap().unwrap()[1],
+            Value::Text("rustlang".into()),
+        );
+    }
+    snap.validate().unwrap();
+}
+
+#[test]
+fn on_update_set_null_nulls_children() {
+    let (cat, _b) = new_catalog();
+    seed_tags_and_hits(&cat, RefAction::SetNull);
+
+    cat.update(
+        "tags",
+        vec![Value::I64(1)],
+        row(&[("slug", Value::Text("rustlang".into()))]),
+    )
+    .unwrap();
+    let snap = cat.snapshot();
+    for id in [1, 2] {
+        assert_eq!(
+            snap.get("hits", &[Value::I64(id)]).unwrap().unwrap()[1],
+            Value::Null,
+        );
+    }
+    snap.validate().unwrap();
 }
 
 // --- persistence -------------------------------------------------------------

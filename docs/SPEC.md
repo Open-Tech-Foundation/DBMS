@@ -36,7 +36,7 @@ storage, distributed operation, OLAP/analytics-scale aggregation, high-ingest wr
 - Every table has a **required primary key (PK)**, single- or multi-column.
 - Relationships are expressed by values (e.g. a column holding another table's key) and resolved at
   query time via joins. **Foreign keys** enforce referential integrity (see §4.1), with
-  `on_delete` actions `RESTRICT` / `CASCADE` / `SET NULL`.
+  `RESTRICT` / `CASCADE` / `SET NULL` actions on both `on_delete` and `on_update`.
 
 ---
 
@@ -72,12 +72,14 @@ Notes:
 - `FOREIGN KEY(cols) REFERENCES parent(cols)` — the referencing columns must match an existing
   parent key. Referenced columns must be the parent's PK or a `UNIQUE` index; composite and
   self-referential keys are allowed; `MATCH SIMPLE` (a NULL in any referencing column skips the
-  check). `on_delete` actions: `RESTRICT` (default — parent delete and `drop table` are blocked
-  while children exist), `CASCADE` (delete the children too, recursively), `SET NULL` (null the
-  children's referencing columns). The full referential closure is planned before any write, so a
-  downstream `RESTRICT` — or a constraint a `SET NULL` would violate — rejects the whole operation
-  with no partial effect. `on_update` is `RESTRICT`-only in v1 (PKs are immutable; `CASCADE` / `SET
-  NULL` on update are deferred).
+  check). Referential actions on both `on_delete` and `on_update`: `RESTRICT` (default — the parent
+  write, and `drop table`, are blocked while children exist), `CASCADE` (delete the children too on
+  delete, or rewrite their referencing columns to the new key on update), `SET NULL` (null the
+  children's referencing columns). The full referential closure — across tables and cycles — is
+  planned before any write, so a downstream `RESTRICT`, or a constraint a rewrite would violate,
+  rejects the whole operation with no partial effect. `on_update` fires only when a referenced
+  `UNIQUE` non-PK key changes (PKs are immutable); an `on_update: CASCADE` may not move a child's own
+  primary-key column.
 - **Auto-increment** integer keys.
 - **Generators** usable as defaults: `now` (current timestamp), `uuid_v7` (new time-ordered UUID).
 - **`rowversion`** column — engine auto-increments it on every write to the row; usable as an
@@ -318,12 +320,12 @@ Layout details are finalized in `ARCHITECTURE.md`.
 | Operators | `= <> < <= > >=`, AND/OR/NOT, `+ − * / %`, IS [NOT] NULL, BETWEEN, IN(list), LIKE/ILIKE |
 | Aggregates | COUNT, SUM, MIN, MAX, AVG (+ group + having) |
 | Scalar | CAST (basic), COALESCE, NULLIF |
-| Constraints | PK (required), NOT NULL, UNIQUE, CHECK, DEFAULT, foreign keys (on_delete RESTRICT/CASCADE/SET NULL; composite/self-referential), auto-increment, generators (now, uuid_v7), rowversion, on_update:now |
+| Constraints | PK (required), NOT NULL, UNIQUE, CHECK, DEFAULT, foreign keys (on_delete + on_update RESTRICT/CASCADE/SET NULL; composite/self-referential), auto-increment, generators (now, uuid_v7), rowversion, on_update:now |
 | Indexes | B+tree single-column, composite, unique; auto-maintained |
 | Tooling | EXPLAIN |
 | Types | null, bool, i64, f64, text, blob, uuid, json (opaque), timestamp |
 
-**Deferred to v2+:** foreign-key `on_update` `CASCADE` / `SET NULL` (referencing an updatable UNIQUE key); hash/merge join; RIGHT/FULL join; UNION/INTERSECT/EXCEPT;
+**Deferred to v2+:** hash/merge join; RIGHT/FULL join; UNION/INTERSECT/EXCEPT;
 subqueries; CTEs; window functions; UPSERT/MERGE; CASE; string/numeric/date functions; JSON path
 queries + JSON-path indexes; partial/expression indexes; ALTER beyond add-column; generated columns;
 savepoints; views; sequences; collations; decimal/money type; compaction/vacuum; cost-based

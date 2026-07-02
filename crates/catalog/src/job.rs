@@ -332,15 +332,14 @@ fn invalid_schema(reason: String) -> CatalogError {
 /// A self-referential key resolves against `def` itself (not yet stored).
 fn validate_fks<B: IoBackend>(ctx: &WriteCtx<'_, B>, def: &TableDef) -> txn::Result<()> {
     for fk in &def.foreign_keys {
-        // `on_delete` supports RESTRICT / CASCADE / SET NULL. `on_update`
-        // actions other than RESTRICT are not yet enforced: primary keys are
-        // immutable, so `on_update` only ever fires for a key referencing a
-        // UNIQUE non-PK column, and a cascading key change would have to move a
-        // child's own primary key — deferred. Reject them at DDL time.
-        if fk.on_update != RefAction::Restrict {
+        // An `on_update` CASCADE would rewrite the child's referencing columns
+        // to the parent's new key; if any of those columns is part of the
+        // child's primary key that would *move* the row's key, which v1 forbids
+        // (primary keys are immutable). Reject it at DDL time. (SET NULL on a PK
+        // column is already rejected: PK columns are NOT NULL.)
+        if fk.on_update == RefAction::Cascade && fk.columns.iter().any(|c| def.pk.contains(c)) {
             return Err(rej(invalid_schema(format!(
-                "foreign key {:?}: on_update CASCADE / SET NULL is not yet supported \
-                 (on_delete supports RESTRICT, CASCADE, and SET NULL)",
+                "foreign key {:?}: on_update CASCADE cannot move a primary-key column",
                 fk.name
             ))));
         }
@@ -679,10 +678,27 @@ fn update<B: IoBackend>(
     let row = transform_row(env, table, &def, &old_row, sets)?;
     run_checks(&def, &row).map_err(rej)?;
     check_update_fks(ctx, &def, &old_row, &row)?;
-    if def.indexes.iter().any(|i| i.unique) {
+
+    // Referenced side: if this update changes a referenced UNIQUE key, plan the
+    // referential closure (on_update CASCADE / SET NULL on children, plus
+    // RESTRICT). Only a table with a unique index can be referenced on a mutable
+    // column — primary keys are immutable — so this is skipped otherwise. The
+    // closure is validated read-only here and applied after the parent's own
+    // rows are written.
+    let referential = if def.indexes.iter().any(|i| i.unique) {
         let tables = all_tables(ctx)?;
-        check_restrict_on_key_change(ctx, &def, &old_row, &row, &tables)?;
-    }
+        let plan = plan_cascade(
+            ctx,
+            &tables,
+            vec![],
+            vec![(table.to_string(), old_row.clone(), row.clone())],
+        )?;
+        check_cascade_restrict(ctx, &tables, &plan)?;
+        validate_cascade_rewrites(ctx, &tables, &plan)?;
+        Some((tables, plan))
+    } else {
+        None
+    };
 
     // Index deltas: only entries whose key changed move; a changed unique key
     // is probed against the index (our own entry sits at the old key, so any
@@ -727,6 +743,10 @@ fn update<B: IoBackend>(
             store_iroot(ctx, table, &idx.name, index_roots[i])?;
         }
     }
+    // Apply the referential closure to the children (parent row already written).
+    if let Some((tables, plan)) = referential {
+        apply_cascade(ctx, &tables, plan)?;
+    }
     Ok(JobOut::Row(row))
 }
 
@@ -747,7 +767,7 @@ fn delete<B: IoBackend>(
     // deletes, SET NULL rewrites), reject any surviving RESTRICT reference, then
     // apply — all validation before the first mutation (no-op on reject).
     let tables = all_tables(ctx)?;
-    let plan = plan_cascade(ctx, &tables, vec![(table.to_string(), pk_key, row)])?;
+    let plan = plan_cascade(ctx, &tables, vec![(table.to_string(), pk_key, row)], vec![])?;
     check_cascade_restrict(ctx, &tables, &plan)?;
     validate_cascade_rewrites(ctx, &tables, &plan)?;
     apply_cascade(ctx, &tables, plan)?;
@@ -835,12 +855,13 @@ fn update_where<B: IoBackend>(
     let mut added: Vec<HashSet<Vec<u8>>> = vec![HashSet::new(); def.indexes.len()];
 
     // A referenced unique key could change under this update; load the tables
-    // once so the referenced-side RESTRICT check can run per matched row.
+    // once so the referential closure can be planned over the matched rows.
     let inbound = if def.indexes.iter().any(|i| i.unique) {
         Some(all_tables(ctx)?)
     } else {
         None
     };
+    let mut change_seeds: Vec<(String, Vec<Value>, Vec<Value>)> = Vec::new();
 
     for (pk_key, bytes) in ctx.scan(data_root, None, None)? {
         let old_row = decode_padded(&def, &bytes).map_err(rej)?;
@@ -853,8 +874,8 @@ fn update_where<B: IoBackend>(
         let row = transform_row(env, table, &def, &old_row, sets)?;
         run_checks(&def, &row).map_err(rej)?;
         check_update_fks(ctx, &def, &old_row, &row)?;
-        if let Some(tables) = &inbound {
-            check_restrict_on_key_change(ctx, &def, &old_row, &row, tables)?;
+        if inbound.is_some() {
+            change_seeds.push((table.to_string(), old_row.clone(), row.clone()));
         }
 
         let mut deltas = Vec::new();
@@ -895,6 +916,19 @@ fn update_where<B: IoBackend>(
         }
     }
 
+    // Referenced side: plan the referential closure for parents whose referenced
+    // key changed (on_update CASCADE / SET NULL on children, plus RESTRICT),
+    // validated read-only here and applied after the parent rows are written.
+    let referential = match inbound {
+        Some(tables) => {
+            let plan = plan_cascade(ctx, &tables, vec![], change_seeds)?;
+            check_cascade_restrict(ctx, &tables, &plan)?;
+            validate_cascade_rewrites(ctx, &tables, &plan)?;
+            Some((tables, plan))
+        }
+        None => None,
+    };
+
     // ---- apply ----
     let affected = matched.len() as u64;
     let mut touched: HashSet<usize> = HashSet::new();
@@ -921,6 +955,10 @@ fn update_where<B: IoBackend>(
                 store_iroot(ctx, table, &idx.name, index_roots[i])?;
             }
         }
+    }
+    // Apply the referential closure to the children (parent rows already written).
+    if let Some((tables, plan)) = referential {
+        apply_cascade(ctx, &tables, plan)?;
     }
     Ok(JobOut::Affected(affected))
 }
@@ -954,7 +992,7 @@ fn delete_where<B: IoBackend>(
 
     // Referenced-side enforcement: plan and apply the referential closure.
     let tables = all_tables(ctx)?;
-    let plan = plan_cascade(ctx, &tables, seeds)?;
+    let plan = plan_cascade(ctx, &tables, seeds, vec![])?;
     check_cascade_restrict(ctx, &tables, &plan)?;
     validate_cascade_rewrites(ctx, &tables, &plan)?;
     apply_cascade(ctx, &tables, plan)?;
@@ -1085,30 +1123,6 @@ fn parent_key_of(parent: &TableDef, fk: &ForeignKey, row: &[Value]) -> Option<Ve
     Some(vals)
 }
 
-/// Whether any row of `child` references `key_vals` through `fk`, skipping rows
-/// whose primary key is in `excluded` (used so a row — or a batch — does not
-/// block its own removal through a self-referential key). Read-only.
-fn child_references<B: IoBackend>(
-    ctx: &WriteCtx<'_, B>,
-    child: &TableDef,
-    fk: &ForeignKey,
-    key_vals: &[Value],
-    excluded: &HashSet<Vec<u8>>,
-    self_ref: bool,
-) -> txn::Result<bool> {
-    let root = load_root(ctx, &child.name)?;
-    for (cpk, bytes) in ctx.scan(root, None, None)? {
-        if self_ref && excluded.contains(&cpk) {
-            continue;
-        }
-        let crow = decode_padded(child, &bytes).map_err(rej)?;
-        if fk_values(child, fk, &crow).as_deref() == Some(key_vals) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 /// The rows in `child` that reference `key_vals` through `fk`, with their PK
 /// keys. Read-only; a full scan of the child (an index on the referencing
 /// columns is a future optimization).
@@ -1175,20 +1189,24 @@ struct Cascade {
     effects: Vec<CascadeEffect>,
 }
 
-/// Plan the referential closure of deleting `seeds` (each `(table, pk_key,
-/// row)`). Follows CASCADE and SET NULL `on_delete` edges (recursively), and
-/// records RESTRICT edges for the separate [`check_cascade_restrict`] pass. The
-/// closure terminates: deletes and rewrites are each recorded at most once per
-/// row, and `on_update` is RESTRICT-only so rewrites spawn no further effects.
+/// Plan the referential closure triggered by removing `delete_seeds` (each
+/// `(table, pk_key, row)`) and/or changing the referenced key of `change_seeds`
+/// (each `(table, old_row, new_row)` — the parent row is rewritten by the
+/// caller, not this closure). Follows CASCADE and SET NULL edges recursively
+/// (`on_delete` for deletes, `on_update` for key changes), and records RESTRICT
+/// edges for the separate [`check_cascade_restrict`] pass. The closure
+/// terminates: each row is recorded at most once, and an `on_update` CASCADE
+/// cannot move a primary key (rejected at DDL), so rewrites do not re-key rows.
 /// Read-only.
 fn plan_cascade<B: IoBackend>(
     ctx: &WriteCtx<'_, B>,
     tables: &[TableDef],
-    seeds: Vec<(String, Vec<u8>, Vec<Value>)>,
+    delete_seeds: Vec<(String, Vec<u8>, Vec<Value>)>,
+    change_seeds: Vec<(String, Vec<Value>, Vec<Value>)>,
 ) -> txn::Result<Cascade> {
     let mut plan = Cascade::default();
     let mut queue: std::collections::VecDeque<CascadeEffect> = std::collections::VecDeque::new();
-    for (table, pk_key, row) in seeds {
+    for (table, pk_key, row) in delete_seeds {
         if plan
             .deletes
             .insert((table.clone(), pk_key), row.clone())
@@ -1200,6 +1218,13 @@ fn plan_cascade<B: IoBackend>(
                 new_row: None,
             });
         }
+    }
+    for (table, old_row, new_row) in change_seeds {
+        queue.push_back(CascadeEffect {
+            table,
+            old_row,
+            new_row: Some(new_row),
+        });
     }
 
     while let Some(eff) = queue.pop_front() {
@@ -1244,16 +1269,24 @@ fn plan_cascade<B: IoBackend>(
                             new_row: None,
                         });
                     } else {
-                        // SET NULL (`on_delete`) rewrites the referencing
-                        // columns to NULL. Accumulate onto any rewrite already
-                        // planned for this row (a child referenced by several
-                        // removed parents) so no nulling is lost.
+                        // Rewrite the child's referencing columns: to the new
+                        // parent key (CASCADE on a key change) or to NULL (SET
+                        // NULL). Accumulate onto any rewrite already planned for
+                        // this row (a child referenced by several changed
+                        // parents) so no earlier edit is lost.
+                        let new_vals = if action == RefAction::Cascade {
+                            eff.new_row
+                                .as_ref()
+                                .and_then(|nr| parent_key_of(parent, fk, nr))
+                        } else {
+                            None // SET NULL
+                        };
                         let base = plan
                             .rewrites
                             .get(&key)
                             .map(|(_, n)| n.clone())
                             .unwrap_or_else(|| crow.clone());
-                        let cnew = set_fk_columns(child, fk, &base, None);
+                        let cnew = set_fk_columns(child, fk, &base, new_vals.as_deref());
                         let changed = plan
                             .rewrites
                             .get(&key)
@@ -1503,41 +1536,6 @@ fn rewrite_row_indexed<B: IoBackend>(
     for i in touched {
         if let Some(idx) = def.indexes.get(i) {
             store_iroot(ctx, &def.name, &idx.name, index_roots[i])?;
-        }
-    }
-    Ok(())
-}
-
-/// RESTRICT enforcement for a referenced-key change: if an update alters a
-/// parent column that some foreign key references, the old key is disappearing,
-/// so reject while any child still references it. (Primary keys are immutable,
-/// so this only fires for keys referencing a `UNIQUE` non-PK column.) Read-only.
-fn check_restrict_on_key_change<B: IoBackend>(
-    ctx: &WriteCtx<'_, B>,
-    parent: &TableDef,
-    old_row: &[Value],
-    new_row: &[Value],
-    tables: &[TableDef],
-) -> txn::Result<()> {
-    for child in tables {
-        for fk in &child.foreign_keys {
-            if fk.parent != parent.name {
-                continue;
-            }
-            let old_key = parent_key_of(parent, fk, old_row);
-            if old_key == parent_key_of(parent, fk, new_row) {
-                continue; // referenced columns unchanged
-            }
-            let Some(key_vals) = old_key else {
-                continue;
-            };
-            let self_ref = child.name == parent.name;
-            if child_references(ctx, child, fk, &key_vals, &HashSet::new(), self_ref)? {
-                return Err(rej(CatalogError::ReferencedByChildren {
-                    table: child.name.clone(),
-                    constraint: fk.name.clone(),
-                }));
-            }
         }
     }
     Ok(())

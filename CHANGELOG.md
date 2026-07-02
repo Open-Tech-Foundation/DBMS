@@ -19,15 +19,16 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
   referencing column skips the check).
   - Referencing side: child `insert`/`update` probe the parent's PK tree or the
     referenced unique index (`ForeignKeyViolation` on a miss).
-  - Referenced side, `on_delete`: **`RESTRICT`** (blocked while children exist —
-    `ReferencedByChildren`), **`CASCADE`** (recursively deletes children), and
-    **`SET NULL`** (nulls the children's referencing columns). The full
-    referential closure is planned read-only — a downstream `RESTRICT` (or any
-    constraint a `SET NULL` would break) aborts the whole delete with no
+  - Referenced side supports **`RESTRICT`** (blocked while children exist —
+    `ReferencedByChildren`), **`CASCADE`**, and **`SET NULL`** on both
+    `on_delete` (parent delete: recursively delete / null children) and
+    `on_update` (a referenced `UNIQUE` key changes: rewrite children to the new
+    key / null them). The full referential closure — across tables and cycles —
+    is planned read-only before any write, so a downstream `RESTRICT`, or a
+    constraint a rewrite would break, aborts the whole operation with no
     mutation. `drop table` of a referenced table is blocked (`TableReferenced`).
-  - `on_update` is `RESTRICT`-only for now (primary keys are immutable, so it
-    only fires for a key referencing a `UNIQUE` non-PK column); `on_update`
-    `CASCADE`/`SET NULL` are rejected at DDL time (D32).
+  - `on_update` `CASCADE` may not move a child's own primary-key column (v1
+    keeps primary keys immutable); that combination is rejected at DDL (D32).
 - Catalog record format gained a foreign-key section. The engine is pre-release,
   so the stored format still evolves in place behind its single version byte (no
   legacy-decode paths); a record is either the current version or rejected as
