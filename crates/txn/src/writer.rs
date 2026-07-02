@@ -200,10 +200,11 @@ impl<B: IoBackend> Writer<B> {
     }
 }
 
-/// Reconstruct a fatal error to fan out to a whole batch. The variants we treat
-/// as fatal here carry no owned payload that prevents a faithful copy.
+/// Reconstruct a fatal error to fan out to a whole batch, preserving its
+/// category (`Io` vs. `Corruption`) so each client sees the true cause.
 fn clone_fatal(err: &TxnError) -> TxnError {
     TxnError::WriterStopped {
         reason: err.to_string(),
+        category: err.category(),
     }
 }

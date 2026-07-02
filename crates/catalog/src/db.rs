@@ -259,6 +259,13 @@ impl<B: IoBackend> CatSnapshot<B> {
         }
     }
 
+    /// The number of live rows in `table`, counted without materializing them
+    /// (O(1) memory) — for the file inspector and other summaries.
+    pub fn row_count(&self, table: &str) -> Result<u64> {
+        let root = self.data_root(table)?;
+        Ok(self.snap.count_in(root)?)
+    }
+
     /// All rows of `table` in primary-key order, each in schema column order.
     pub fn scan(&self, table: &str) -> Result<Vec<Vec<Value>>> {
         let def = self.table(table)?;

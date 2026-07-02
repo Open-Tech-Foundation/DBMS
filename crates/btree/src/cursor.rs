@@ -91,6 +91,16 @@ impl<'p, B: IoBackend> Cursor<'p, B> {
         Ok(out)
     }
 
+    /// Count the remaining entries in the range, holding only one at a time —
+    /// O(1) memory, for callers that need a count but not the rows.
+    pub fn count(mut self) -> Result<u64> {
+        let mut n = 0;
+        while self.next_entry()?.is_some() {
+            n += 1;
+        }
+        Ok(n)
+    }
+
     fn read(&self, id: PageId) -> Result<Node> {
         let frame = self.pager.read_page(id)?;
         Node::decode(&frame[HEADER_SIZE..], id)

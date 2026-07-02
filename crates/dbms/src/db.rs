@@ -237,7 +237,7 @@ impl<B: IoBackend + 'static> Database<B> {
         let mut tables = Vec::new();
         for name in snap.tables()? {
             let def = snap.table(&name)?;
-            let rows = snap.scan(&name)?.len();
+            let rows = snap.row_count(&name)? as usize;
             tables.push(TableInfo {
                 name: def.name.clone(),
                 columns: def.columns.len(),

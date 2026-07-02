@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use btree::BTree;
-use common::IoBackend;
+use common::{ErrorCategory, IoBackend};
 use pager::{PageId, Pager};
 
 use crate::job::{OpsJob, WriteJob};
@@ -230,6 +230,12 @@ impl<B: IoBackend> Snapshot<B> {
         self.range_in(root, None, None)
     }
 
+    /// Count the entries in the tree at `root` without materializing them —
+    /// O(1) memory (see [`get_in`](Self::get_in) for the reachability contract).
+    pub fn count_in(&self, root: PageId) -> Result<u64> {
+        Ok(BTree::new(&*self.pager).range(root, None, None)?.count()?)
+    }
+
     /// Run the B+tree structural validator over the tree at `root` (see
     /// [`get_in`](Self::get_in) for the reachability contract).
     pub fn validate_tree(&self, root: PageId) -> Result<btree::TreeStats> {
@@ -248,7 +254,11 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 fn writer_gone() -> TxnError {
+    // The reply channel closed without an error reaching us — the writer is
+    // simply gone (fatal I/O already fanned out, or shutdown). `Io` is the
+    // faithful default; a specific fatal category rides its own reply.
     TxnError::WriterStopped {
         reason: "the writer thread has stopped".to_string(),
+        category: ErrorCategory::Io,
     }
 }

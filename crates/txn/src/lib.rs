@@ -60,6 +60,9 @@ pub enum TxnError {
     WriterStopped {
         /// What stopped the writer.
         reason: String,
+        /// The category of the fatal error that stopped the writer, preserved so
+        /// the triggering client still sees `Corruption` vs. `Io` faithfully.
+        category: ErrorCategory,
     },
     /// The handle was used after it began shutting down.
     #[error("database handle is closed")]
@@ -72,7 +75,8 @@ impl CategorizedError for TxnError {
             TxnError::Pager(e) => e.category(),
             TxnError::BTree(e) => e.category(),
             TxnError::Rejected(e) => e.category(),
-            TxnError::WriterStopped { .. } | TxnError::Closed => ErrorCategory::Io,
+            TxnError::WriterStopped { category, .. } => *category,
+            TxnError::Closed => ErrorCategory::Io,
         }
     }
 }

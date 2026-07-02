@@ -17,6 +17,12 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
   the file. The pager records each transaction's allocations and the writer
   returns a rejected job's pages to the free list inside the next committing
   batch (D28).
+- `txn`: `WriterStopped` now carries the **category** of the fatal error that
+  stopped the writer, so a client sees `Corruption` vs. `Io` faithfully instead
+  of everything collapsing to `Io`.
+- `otf-dbms`: `Database::inspect` counts rows with an O(1)-memory cursor
+  (`CatSnapshot::row_count` → `Snapshot::count_in` → `Cursor::count`) instead of
+  materializing every row of every table.
 
 ### Phase 10 — Public API & tools
 
