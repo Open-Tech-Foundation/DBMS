@@ -17,7 +17,7 @@ use txn::{TxnError, WriteCtx, WriteJob};
 use types::{encode_key, encode_row, UuidV7Gen, Value};
 
 use crate::codec::{decode_table, encode_table};
-use crate::schema::{ColumnDef, DefaultSpec, IndexDef, TableDef};
+use crate::schema::{ColumnDef, DefaultSpec, ForeignKey, IndexDef, RefAction, TableDef};
 use crate::store;
 use crate::CatalogError;
 
@@ -176,6 +176,28 @@ fn load_table<B: IoBackend>(ctx: &WriteCtx<'_, B>, table: &str) -> txn::Result<T
     }
 }
 
+fn load_table_opt<B: IoBackend>(
+    ctx: &WriteCtx<'_, B>,
+    table: &str,
+) -> txn::Result<Option<TableDef>> {
+    let key = store::tbl_key(table).map_err(rej)?;
+    match ctx.lookup(ctx.root(), &key)? {
+        Some(bytes) => Ok(Some(decode_table(&bytes).map_err(rej)?)),
+        None => Ok(None),
+    }
+}
+
+/// Every table definition currently in the catalog. Used by foreign-key
+/// enforcement to discover inbound references.
+fn all_tables<B: IoBackend>(ctx: &WriteCtx<'_, B>) -> txn::Result<Vec<TableDef>> {
+    let (lo, hi) = store::tbl_band().map_err(rej)?;
+    let mut defs = Vec::new();
+    for (_, bytes) in ctx.scan(ctx.root(), Some(&lo), Some(&hi))? {
+        defs.push(decode_table(&bytes).map_err(rej)?);
+    }
+    Ok(defs)
+}
+
 fn load_root<B: IoBackend>(ctx: &WriteCtx<'_, B>, table: &str) -> txn::Result<PageId> {
     let key = store::root_key(table).map_err(rej)?;
     match ctx.lookup(ctx.root(), &key)? {
@@ -300,9 +322,74 @@ fn apply_backfill<B: IoBackend>(
 
 // --- DDL ---------------------------------------------------------------------
 
+fn invalid_schema(reason: String) -> CatalogError {
+    CatalogError::InvalidSchema { reason }
+}
+
+/// Cross-table foreign-key checks that [`TableDef::validate`] cannot make on its
+/// own: the parent table exists, the referenced columns form the parent's
+/// primary key or a `UNIQUE` index, and the column types line up positionally.
+/// A self-referential key resolves against `def` itself (not yet stored).
+fn validate_fks<B: IoBackend>(ctx: &WriteCtx<'_, B>, def: &TableDef) -> txn::Result<()> {
+    for fk in &def.foreign_keys {
+        // CASCADE / SET NULL are modelled and persisted, but not yet enforced;
+        // only RESTRICT (the default) is honoured this release. Reject the
+        // others at DDL time rather than silently ignoring them at write time.
+        if fk.on_delete != RefAction::Restrict || fk.on_update != RefAction::Restrict {
+            return Err(rej(invalid_schema(format!(
+                "foreign key {:?}: only the RESTRICT referential action is supported \
+                 in this release (CASCADE and SET NULL are not yet enforced)",
+                fk.name
+            ))));
+        }
+        let parent = if fk.parent == def.name {
+            def.clone()
+        } else {
+            load_table_opt(ctx, &fk.parent)?.ok_or_else(|| {
+                rej(invalid_schema(format!(
+                    "foreign key {:?} references unknown table {:?}",
+                    fk.name, fk.parent
+                )))
+            })?
+        };
+        let is_pk = parent.pk == fk.parent_columns;
+        let is_unique_index = parent
+            .indexes
+            .iter()
+            .any(|idx| idx.unique && idx.columns == fk.parent_columns);
+        if !is_pk && !is_unique_index {
+            return Err(rej(invalid_schema(format!(
+                "foreign key {:?} must reference the parent's primary key or a unique index",
+                fk.name
+            ))));
+        }
+        for (child, parent_col) in fk.columns.iter().zip(&fk.parent_columns) {
+            let child_kind = def
+                .col_index(child)
+                .and_then(|i| def.columns.get(i))
+                .map(|c| c.kind);
+            let parent_kind = parent
+                .col_index(parent_col)
+                .and_then(|i| parent.columns.get(i))
+                .map(|c| c.kind);
+            match (child_kind, parent_kind) {
+                (Some(a), Some(b)) if a == b => {}
+                _ => {
+                    return Err(rej(invalid_schema(format!(
+                        "foreign key {:?} column types do not match the referenced columns",
+                        fk.name
+                    ))))
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn create_table<B: IoBackend>(ctx: &mut WriteCtx<'_, B>, mut def: TableDef) -> txn::Result<JobOut> {
     def.materialize_implicit_indexes();
     def.validate().map_err(rej)?;
+    validate_fks(ctx, &def)?;
     let tbl_key = store::tbl_key(&def.name).map_err(rej)?;
     if ctx.lookup(ctx.root(), &tbl_key)?.is_some() {
         return Err(rej(CatalogError::TableExists {
@@ -336,6 +423,22 @@ fn create_table<B: IoBackend>(ctx: &mut WriteCtx<'_, B>, mut def: TableDef) -> t
 fn drop_table<B: IoBackend>(ctx: &mut WriteCtx<'_, B>, table: &str) -> txn::Result<JobOut> {
     // Existence check (typed NotFound rather than a silent no-op).
     let _ = load_table(ctx, table)?;
+
+    // Refuse to orphan a foreign key: another table must not reference this one.
+    // A self-reference does not block the table's own drop.
+    for other in all_tables(ctx)? {
+        if other.name == table {
+            continue;
+        }
+        if let Some(fk) = other.foreign_keys.iter().find(|fk| fk.parent == table) {
+            return Err(rej(CatalogError::TableReferenced {
+                table: table.to_string(),
+                by: other.name.clone(),
+                constraint: fk.name.clone(),
+            }));
+        }
+    }
+
     let data_root = load_root(ctx, table)?;
     ctx.free_tree(data_root)?;
 
@@ -494,6 +597,7 @@ fn insert<B: IoBackend>(
     for provided in input {
         let row = build_row(env, &def, provided, &mut seq).map_err(rej)?;
         run_checks(&def, &row).map_err(rej)?;
+        check_insert_fks(ctx, &def, &row, &staged_pks)?;
 
         let pk_key = pk_key_of(&def, &row).map_err(rej)?;
         if staged_pks.contains(&pk_key) || ctx.lookup(data_root, &pk_key)?.is_some() {
@@ -572,6 +676,11 @@ fn update<B: IoBackend>(
     let old_row = decode_padded(&def, &bytes).map_err(rej)?;
     let row = transform_row(env, table, &def, &old_row, sets)?;
     run_checks(&def, &row).map_err(rej)?;
+    check_update_fks(ctx, &def, &old_row, &row)?;
+    if def.indexes.iter().any(|i| i.unique) {
+        let tables = all_tables(ctx)?;
+        check_restrict_on_key_change(ctx, &def, &old_row, &row, &tables)?;
+    }
 
     // Index deltas: only entries whose key changed move; a changed unique key
     // is probed against the index (our own entry sits at the old key, so any
@@ -632,6 +741,11 @@ fn delete<B: IoBackend>(
         return Ok(JobOut::Deleted(false));
     };
     let row = decode_padded(&def, &bytes).map_err(rej)?;
+
+    // Referenced-side enforcement: refuse to orphan a child (RESTRICT).
+    let tables = all_tables(ctx)?;
+    let excluded: HashSet<Vec<u8>> = std::iter::once(pk_key.clone()).collect();
+    check_restrict_on_remove(ctx, &def, std::slice::from_ref(&row), &excluded, &tables)?;
 
     data_root = ctx.delete(data_root, &pk_key)?;
     let mut touched = Vec::new();
@@ -734,6 +848,14 @@ fn update_where<B: IoBackend>(
     let mut removed: Vec<HashSet<Vec<u8>>> = vec![HashSet::new(); def.indexes.len()];
     let mut added: Vec<HashSet<Vec<u8>>> = vec![HashSet::new(); def.indexes.len()];
 
+    // A referenced unique key could change under this update; load the tables
+    // once so the referenced-side RESTRICT check can run per matched row.
+    let inbound = if def.indexes.iter().any(|i| i.unique) {
+        Some(all_tables(ctx)?)
+    } else {
+        None
+    };
+
     for (pk_key, bytes) in ctx.scan(data_root, None, None)? {
         let old_row = decode_padded(&def, &bytes).map_err(rej)?;
         if !policy.matches(&def, &old_row).map_err(TxnError::Rejected)? {
@@ -744,6 +866,10 @@ fn update_where<B: IoBackend>(
             .map_err(TxnError::Rejected)?;
         let row = transform_row(env, table, &def, &old_row, sets)?;
         run_checks(&def, &row).map_err(rej)?;
+        check_update_fks(ctx, &def, &old_row, &row)?;
+        if let Some(tables) = &inbound {
+            check_restrict_on_key_change(ctx, &def, &old_row, &row, tables)?;
+        }
 
         let mut deltas = Vec::new();
         for (i, idx) in def.indexes.iter().enumerate() {
@@ -828,6 +954,8 @@ fn delete_where<B: IoBackend>(
     // Per matched row: its PK key and the (index, entry) pairs to remove.
     type Doomed = (Vec<u8>, Vec<(usize, Entry)>);
     let mut matched: Vec<Doomed> = Vec::new();
+    let mut doomed_rows: Vec<Vec<Value>> = Vec::new();
+    let mut doomed_pks: HashSet<Vec<u8>> = HashSet::new();
     for (pk_key, bytes) in ctx.scan(data_root, None, None)? {
         let row = decode_padded(&def, &bytes).map_err(rej)?;
         if !filter.matches(&def, &row).map_err(TxnError::Rejected)? {
@@ -839,8 +967,16 @@ fn delete_where<B: IoBackend>(
                 entries.push((i, e));
             }
         }
+        doomed_pks.insert(pk_key.clone());
+        doomed_rows.push(row);
         matched.push((pk_key, entries));
     }
+
+    // Referenced-side enforcement: refuse to orphan a child (RESTRICT). The
+    // whole doomed batch is excluded, so a self-referential chain removed
+    // together does not block itself.
+    let tables = all_tables(ctx)?;
+    check_restrict_on_remove(ctx, &def, &doomed_rows, &doomed_pks, &tables)?;
 
     // ---- apply ----
     let affected = matched.len() as u64;
@@ -865,6 +1001,237 @@ fn delete_where<B: IoBackend>(
         }
     }
     Ok(JobOut::Affected(affected))
+}
+
+// --- foreign-key enforcement -------------------------------------------------
+
+/// The referencing column values of `fk` within `row`, in fk order — or `None`
+/// if any is NULL (MATCH SIMPLE: such a row is not checked).
+fn fk_values(child: &TableDef, fk: &ForeignKey, row: &[Value]) -> Option<Vec<Value>> {
+    let mut vals = Vec::with_capacity(fk.columns.len());
+    for name in &fk.columns {
+        let v = child
+            .col_index(name)
+            .and_then(|i| row.get(i))
+            .cloned()
+            .unwrap_or(Value::Null);
+        if matches!(v, Value::Null) {
+            return None;
+        }
+        vals.push(v);
+    }
+    Some(vals)
+}
+
+/// Whether a parent row keyed by `vals` currently exists, probing the parent's
+/// primary-key tree or the referenced unique index. `fk.parent` is guaranteed
+/// to exist by DDL validation and the drop guard.
+fn parent_key_exists<B: IoBackend>(
+    ctx: &WriteCtx<'_, B>,
+    fk: &ForeignKey,
+    vals: &[Value],
+) -> txn::Result<bool> {
+    let parent = load_table(ctx, &fk.parent)?;
+    if parent.pk == fk.parent_columns {
+        let root = load_root(ctx, &fk.parent)?;
+        let key = encode_key(vals).map_err(|e| rej(e.into()))?;
+        Ok(ctx.lookup(root, &key)?.is_some())
+    } else {
+        let idx = parent
+            .indexes
+            .iter()
+            .find(|i| i.unique && i.columns == fk.parent_columns)
+            .ok_or_else(|| {
+                rej(invalid_schema(format!(
+                    "foreign key {:?} lost its referenced unique index",
+                    fk.name
+                )))
+            })?;
+        let iroot = load_iroot(ctx, &fk.parent, &idx.name)?;
+        Ok(index::probe_unique(ctx, iroot, vals)
+            .map_err(idx_err)?
+            .is_some())
+    }
+}
+
+/// Enforce every foreign key of a freshly built child row. A same-batch
+/// self-reference to the parent's primary key is satisfied by an earlier
+/// `staged` row.
+fn check_insert_fks<B: IoBackend>(
+    ctx: &WriteCtx<'_, B>,
+    child: &TableDef,
+    row: &[Value],
+    staged: &HashSet<Vec<u8>>,
+) -> txn::Result<()> {
+    for fk in &child.foreign_keys {
+        let Some(vals) = fk_values(child, fk, row) else {
+            continue;
+        };
+        if fk.parent == child.name && fk.parent_columns == child.pk {
+            let key = encode_key(&vals).map_err(|e| rej(e.into()))?;
+            if staged.contains(&key) {
+                continue;
+            }
+        }
+        if !parent_key_exists(ctx, fk, &vals)? {
+            return Err(rej(CatalogError::ForeignKeyViolation {
+                table: child.name.clone(),
+                constraint: fk.name.clone(),
+            }));
+        }
+    }
+    Ok(())
+}
+
+/// Enforce foreign keys whose referencing columns actually changed by an
+/// update (unchanged values were valid before the write).
+fn check_update_fks<B: IoBackend>(
+    ctx: &WriteCtx<'_, B>,
+    child: &TableDef,
+    old_row: &[Value],
+    new_row: &[Value],
+) -> txn::Result<()> {
+    for fk in &child.foreign_keys {
+        let new_vals = fk_values(child, fk, new_row);
+        if fk_values(child, fk, old_row) == new_vals {
+            continue;
+        }
+        let Some(vals) = new_vals else {
+            continue;
+        };
+        if !parent_key_exists(ctx, fk, &vals)? {
+            return Err(rej(CatalogError::ForeignKeyViolation {
+                table: child.name.clone(),
+                constraint: fk.name.clone(),
+            }));
+        }
+    }
+    Ok(())
+}
+
+/// The parent-key values of `fk` read out of a parent `row` (the values of
+/// `fk.parent_columns`), or `None` if any is NULL (nothing can reference it).
+fn parent_key_of(parent: &TableDef, fk: &ForeignKey, row: &[Value]) -> Option<Vec<Value>> {
+    let mut vals = Vec::with_capacity(fk.parent_columns.len());
+    for name in &fk.parent_columns {
+        let v = parent
+            .col_index(name)
+            .and_then(|i| row.get(i))
+            .cloned()
+            .unwrap_or(Value::Null);
+        if matches!(v, Value::Null) {
+            return None;
+        }
+        vals.push(v);
+    }
+    Some(vals)
+}
+
+/// Whether any row of `child` references `key_vals` through `fk`, skipping rows
+/// whose primary key is in `excluded` (used so a row — or a batch — does not
+/// block its own removal through a self-referential key). Read-only.
+fn child_references<B: IoBackend>(
+    ctx: &WriteCtx<'_, B>,
+    child: &TableDef,
+    fk: &ForeignKey,
+    key_vals: &[Value],
+    excluded: &HashSet<Vec<u8>>,
+    self_ref: bool,
+) -> txn::Result<bool> {
+    let root = load_root(ctx, &child.name)?;
+    for (cpk, bytes) in ctx.scan(root, None, None)? {
+        if self_ref && excluded.contains(&cpk) {
+            continue;
+        }
+        let crow = decode_padded(child, &bytes).map_err(rej)?;
+        if fk_values(child, fk, &crow).as_deref() == Some(key_vals) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// RESTRICT enforcement for the referenced side of a removal: reject while any
+/// child still references a parent row in `removed`. `excluded` is the set of
+/// primary keys being removed from `parent` this write, so self-referential
+/// keys do not block the batch's own deletion. Read-only.
+fn check_restrict_on_remove<B: IoBackend>(
+    ctx: &WriteCtx<'_, B>,
+    parent: &TableDef,
+    removed: &[Vec<Value>],
+    excluded: &HashSet<Vec<u8>>,
+    tables: &[TableDef],
+) -> txn::Result<()> {
+    for child in tables {
+        for fk in &child.foreign_keys {
+            if fk.parent != parent.name {
+                continue;
+            }
+            let self_ref = child.name == parent.name;
+            for row in removed {
+                let Some(key_vals) = parent_key_of(parent, fk, row) else {
+                    continue;
+                };
+                if child_references(ctx, child, fk, &key_vals, excluded, self_ref)? {
+                    return Err(rej(CatalogError::ReferencedByChildren {
+                        table: child.name.clone(),
+                        constraint: fk.name.clone(),
+                    }));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// RESTRICT enforcement for a referenced-key change: if an update alters a
+/// parent column that some foreign key references, the old key is disappearing,
+/// so reject while any child still references it. (Primary keys are immutable,
+/// so this only fires for keys referencing a `UNIQUE` non-PK column.) Read-only.
+fn check_restrict_on_key_change<B: IoBackend>(
+    ctx: &WriteCtx<'_, B>,
+    parent: &TableDef,
+    old_row: &[Value],
+    new_row: &[Value],
+    tables: &[TableDef],
+) -> txn::Result<()> {
+    for child in tables {
+        for fk in &child.foreign_keys {
+            if fk.parent != parent.name {
+                continue;
+            }
+            let old_key = parent_key_of(parent, fk, old_row);
+            if old_key == parent_key_of(parent, fk, new_row) {
+                continue; // referenced columns unchanged
+            }
+            let Some(key_vals) = old_key else {
+                continue;
+            };
+            let self_ref = child.name == parent.name;
+            if child_references(ctx, child, fk, &key_vals, &HashSet::new(), self_ref)? {
+                return Err(rej(CatalogError::ReferencedByChildren {
+                    table: child.name.clone(),
+                    constraint: fk.name.clone(),
+                }));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Load one index tree's root by table and index name.
+fn load_iroot<B: IoBackend>(
+    ctx: &WriteCtx<'_, B>,
+    table: &str,
+    index: &str,
+) -> txn::Result<PageId> {
+    let key = store::iroot_key(table, index).map_err(rej)?;
+    match ctx.lookup(ctx.root(), &key)? {
+        Some(bytes) => store::decode_root(&bytes).map_err(rej),
+        None => Err(rej(CatalogError::Corrupt(
+            crate::CatalogCorruption::MissingEntry,
+        ))),
+    }
 }
 
 // --- row construction & checks ----------------------------------------------

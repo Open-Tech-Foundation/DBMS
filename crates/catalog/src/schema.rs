@@ -323,6 +323,79 @@ pub fn implicit_index_name(table: &str, column: &str) -> String {
     format!("uniq_{table}_{column}")
 }
 
+/// What happens to referencing child rows when the referenced parent key is
+/// deleted (`on_delete`) or changed (`on_update`) — the referential action of a
+/// [`ForeignKey`] (`SPEC.md` §4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RefAction {
+    /// Reject the parent write while any child still references the key. The
+    /// default (`NO ACTION` and `RESTRICT` coincide with no deferred checks).
+    #[default]
+    Restrict,
+    /// Propagate the parent write to the children: delete them (`on_delete`) or
+    /// rewrite their foreign-key columns to the new parent key (`on_update`).
+    Cascade,
+    /// Set the children's foreign-key columns to NULL. Requires those columns to
+    /// be nullable (checked at DDL time).
+    SetNull,
+}
+
+/// A foreign-key constraint: this table's [`columns`](Self::columns) must match
+/// an existing key in [`parent`](Self::parent) (`SPEC.md` §4.1).
+///
+/// The parent columns must form the parent's primary key or a `UNIQUE` index,
+/// and correspond positionally and by type to the child columns. Following
+/// `MATCH SIMPLE`, a child row with a NULL in any foreign-key column is not
+/// checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKey {
+    /// The constraint name (unique within the child table).
+    pub name: String,
+    /// The referencing columns in this table, in correspondence order.
+    pub columns: Vec<String>,
+    /// The referenced (parent) table. May be this table (self-referential).
+    pub parent: String,
+    /// The referenced columns in the parent, positionally matching
+    /// [`columns`](Self::columns).
+    pub parent_columns: Vec<String>,
+    /// Action applied to children when a referenced parent row is deleted.
+    pub on_delete: RefAction,
+    /// Action applied to children when a referenced parent key changes.
+    pub on_update: RefAction,
+}
+
+impl ForeignKey {
+    /// A `RESTRICT`/`RESTRICT` foreign key from `columns` to
+    /// `parent(parent_columns)`.
+    pub fn new(
+        name: impl Into<String>,
+        columns: Vec<impl Into<String>>,
+        parent: impl Into<String>,
+        parent_columns: Vec<impl Into<String>>,
+    ) -> Self {
+        ForeignKey {
+            name: name.into(),
+            columns: columns.into_iter().map(Into::into).collect(),
+            parent: parent.into(),
+            parent_columns: parent_columns.into_iter().map(Into::into).collect(),
+            on_delete: RefAction::Restrict,
+            on_update: RefAction::Restrict,
+        }
+    }
+
+    /// Set the `on_delete` referential action.
+    pub fn on_delete(mut self, action: RefAction) -> Self {
+        self.on_delete = action;
+        self
+    }
+
+    /// Set the `on_update` referential action.
+    pub fn on_update(mut self, action: RefAction) -> Self {
+        self.on_update = action;
+        self
+    }
+}
+
 /// One table definition.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableDef {
@@ -336,6 +409,8 @@ pub struct TableDef {
     pub checks: Vec<CheckExpr>,
     /// Secondary indexes (user-defined and implicit `unique` backings).
     pub indexes: Vec<IndexDef>,
+    /// Foreign-key constraints referencing other tables (or this one).
+    pub foreign_keys: Vec<ForeignKey>,
 }
 
 impl TableDef {
@@ -351,6 +426,7 @@ impl TableDef {
             pk: pk.into_iter().map(Into::into).collect(),
             checks: Vec::new(),
             indexes: Vec::new(),
+            foreign_keys: Vec::new(),
         }
     }
 
@@ -363,6 +439,12 @@ impl TableDef {
     /// Attach a secondary index.
     pub fn index(mut self, index: IndexDef) -> Self {
         self.indexes.push(index);
+        self
+    }
+
+    /// Attach a foreign-key constraint.
+    pub fn foreign_key(mut self, fk: ForeignKey) -> Self {
+        self.foreign_keys.push(fk);
         self
     }
 
@@ -509,6 +591,46 @@ impl TableDef {
                 if col.kind == TypeKind::Json {
                     return Err(invalid("json columns cannot be indexed"));
                 }
+            }
+        }
+
+        for (i, fk) in self.foreign_keys.iter().enumerate() {
+            if fk.name.is_empty() {
+                return Err(invalid("foreign-key names must not be empty"));
+            }
+            if self.foreign_keys[..i].iter().any(|f| f.name == fk.name) {
+                return Err(invalid("duplicate foreign-key name"));
+            }
+            if fk.columns.is_empty() {
+                return Err(invalid("a foreign key needs at least one column"));
+            }
+            if fk.columns.len() != fk.parent_columns.len() {
+                return Err(invalid(
+                    "foreign-key column count must match the referenced column count",
+                ));
+            }
+            for (j, name) in fk.columns.iter().enumerate() {
+                if fk.columns[..j].contains(name) {
+                    return Err(invalid("duplicate column within a foreign key"));
+                }
+                let Some(col) = self.columns.iter().find(|c| c.name == *name) else {
+                    return Err(CatalogError::UnknownColumn {
+                        table: self.name.clone(),
+                        column: name.clone(),
+                    });
+                };
+                // A SET NULL action must be able to null the child columns.
+                let sets_null =
+                    fk.on_delete == RefAction::SetNull || fk.on_update == RefAction::SetNull;
+                if sets_null {
+                    let ci = self.col_index(name).unwrap_or(usize::MAX);
+                    if !self.is_nullable(ci) {
+                        return Err(invalid(
+                            "a set-null foreign key requires nullable referencing columns",
+                        ));
+                    }
+                }
+                let _ = col;
             }
         }
         Ok(())

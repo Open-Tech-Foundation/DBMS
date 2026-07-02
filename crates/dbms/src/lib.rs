@@ -64,7 +64,9 @@ pub use result::{DecodeError, Response, Row};
 // everything through `otf_dbms` alone. `catalog::CmpOp` (the CHECK comparison
 // operator) is aliased to `CheckCmpOp` so it does not collide with the
 // expression-grammar `proto::CmpOp` re-exported below.
-pub use catalog::{CheckExpr, CmpOp as CheckCmpOp, ColumnDef, IndexDef, TableDef};
+pub use catalog::{
+    CheckExpr, CmpOp as CheckCmpOp, ColumnDef, ForeignKey, IndexDef, RefAction, TableDef,
+};
 pub use proto::{
     AggFunc, ArithOp, ClauseSelect, CmpOp, Delete, Dir, Expr, Insert, JoinKind, JoinSpec,
     Projection, QueryResult, Request, Select, Selector, SortKey, Stage, TableRef, Update,

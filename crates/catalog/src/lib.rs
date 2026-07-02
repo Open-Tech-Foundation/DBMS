@@ -48,7 +48,8 @@ use types::TypeKind;
 pub use db::{CatSnapshot, Catalog};
 pub use policy::{PolicyError, RowFilter, RowUpdater, WriteSpec};
 pub use schema::{
-    implicit_index_name, CheckExpr, CmpOp, ColumnDef, DefaultSpec, IndexDef, TableDef, UpdatePolicy,
+    implicit_index_name, CheckExpr, CmpOp, ColumnDef, DefaultSpec, ForeignKey, IndexDef, RefAction,
+    TableDef, UpdatePolicy,
 };
 
 /// How stored catalog bytes can be malformed.
@@ -236,6 +237,33 @@ pub enum CatalogError {
         /// Which check (by definition order).
         index: usize,
     },
+    /// A referencing (child) row has no matching parent key.
+    #[error("foreign key {constraint:?} on table {table:?} has no matching parent row")]
+    ForeignKeyViolation {
+        /// The child table written.
+        table: String,
+        /// The violated foreign-key constraint.
+        constraint: String,
+    },
+    /// A parent write is blocked because child rows still reference it under a
+    /// `RESTRICT` action.
+    #[error("row in {table:?} is still referenced by foreign key {constraint:?}")]
+    ReferencedByChildren {
+        /// The child table holding the referencing rows.
+        table: String,
+        /// The foreign-key constraint that restricts the parent write.
+        constraint: String,
+    },
+    /// `drop table` for a table another table's foreign key references.
+    #[error("table {table:?} is referenced by foreign key {constraint:?} on table {by:?}")]
+    TableReferenced {
+        /// The table being dropped.
+        table: String,
+        /// The child table whose foreign key blocks the drop.
+        by: String,
+        /// The blocking foreign-key constraint.
+        constraint: String,
+    },
     /// A rejection raised by a caller-supplied write policy (e.g. the query
     /// layer's expression evaluator). Its taxonomy category is preserved; a
     /// higher layer can downcast `source` to recover the original typed error.
@@ -272,7 +300,10 @@ impl CategorizedError for CatalogError {
             CatalogError::NotNull { .. }
             | CatalogError::DuplicateKey { .. }
             | CatalogError::UniqueViolation { .. }
-            | CatalogError::CheckViolation { .. } => ErrorCategory::Constraint,
+            | CatalogError::CheckViolation { .. }
+            | CatalogError::ForeignKeyViolation { .. }
+            | CatalogError::ReferencedByChildren { .. }
+            | CatalogError::TableReferenced { .. } => ErrorCategory::Constraint,
             CatalogError::Policy { category, .. } => *category,
         }
     }

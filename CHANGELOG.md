@@ -8,6 +8,24 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 
 ## [Unreleased]
 
+### Foreign keys (v2 schema power, `PLAN.md` §8.2)
+
+#### Added
+- **Foreign-key constraints** (`ForeignKey`, `RefAction`), declarable via
+  `TableDef::foreign_key` and enforced in the writer under the existing
+  validate-then-apply contract (a rejected key is a guaranteed no-op). Composite
+  and self-referential keys are supported; referenced columns must be the
+  parent's primary key or a `UNIQUE` index; `MATCH SIMPLE` (a NULL in any
+  referencing column skips the check).
+  - Referencing side: child `insert`/`update` probe the parent's PK tree or the
+    referenced unique index (`ForeignKeyViolation` on a miss).
+  - Referenced side: parent `delete`/`update` and `drop table` are **RESTRICT**
+    — blocked while any child still references the row (`ReferencedByChildren`,
+    `TableReferenced`).
+  - `CASCADE` and `SET NULL` are modelled and persisted (catalog format v3) but
+    **not yet enforced**; they are rejected at DDL time this release (D32).
+- `otf-dbms`: re-export `ForeignKey` and `RefAction`.
+
 ### Phase 11 — Playgrounds, hardening & benchmarking
 
 #### Added

@@ -8,14 +8,21 @@
 use types::{decode_row, encode_row, TypeKind, Value};
 
 use crate::schema::{
-    CheckExpr, CmpOp, ColumnDef, DefaultSpec, IndexDef, TableDef, UpdatePolicy, MAX_CHECK_DEPTH,
+    CheckExpr, CmpOp, ColumnDef, DefaultSpec, ForeignKey, IndexDef, RefAction, TableDef,
+    UpdatePolicy, MAX_CHECK_DEPTH,
 };
 use crate::{CatalogCorruption, CatalogError, Result};
 
-/// Version 2 added the secondary-index section (Phase 7); version-1 records
-/// (no indexes) still decode.
-const VERSION: u8 = 2;
-const VERSION_NO_INDEXES: u8 = 1;
+/// Current stored-format version. History (older records still decode):
+/// - v1: base columns, pk, checks.
+/// - v2: added the secondary-index section (Phase 7).
+/// - v3: added the foreign-key section.
+const VERSION: u8 = 3;
+const MIN_VERSION: u8 = 1;
+/// Records at or above this version carry the index section.
+const VERSION_WITH_INDEXES: u8 = 2;
+/// Records at or above this version carry the foreign-key section.
+const VERSION_WITH_FKS: u8 = 3;
 
 const FLAG_NULLABLE: u8 = 1 << 0;
 const FLAG_UNIQUE: u8 = 1 << 1;
@@ -91,6 +98,21 @@ pub(crate) fn encode_table(def: &TableDef) -> Result<Vec<u8>> {
             push_str(&mut out, col)?;
         }
     }
+    push_count(&mut out, def.foreign_keys.len())?;
+    for fk in &def.foreign_keys {
+        push_str(&mut out, &fk.name)?;
+        push_count(&mut out, fk.columns.len())?;
+        for col in &fk.columns {
+            push_str(&mut out, col)?;
+        }
+        push_str(&mut out, &fk.parent)?;
+        push_count(&mut out, fk.parent_columns.len())?;
+        for col in &fk.parent_columns {
+            push_str(&mut out, col)?;
+        }
+        out.push(action_code(fk.on_delete));
+        out.push(action_code(fk.on_update));
+    }
     Ok(out)
 }
 
@@ -98,7 +120,7 @@ pub(crate) fn encode_table(def: &TableDef) -> Result<Vec<u8>> {
 pub(crate) fn decode_table(bytes: &[u8]) -> Result<TableDef> {
     let mut r = Reader { rest: bytes };
     let version = r.byte()?;
-    if version != VERSION && version != VERSION_NO_INDEXES {
+    if !(MIN_VERSION..=VERSION).contains(&version) {
         return Err(corrupt(CatalogCorruption::BadVersion { version }));
     }
     let name = r.string()?;
@@ -142,7 +164,7 @@ pub(crate) fn decode_table(bytes: &[u8]) -> Result<TableDef> {
         checks.push(r.check(0)?);
     }
     let mut indexes = Vec::new();
-    if version >= VERSION {
+    if version >= VERSION_WITH_INDEXES {
         let index_count = r.count()?;
         indexes.reserve(index_count.min(64));
         for _ in 0..index_count {
@@ -164,6 +186,35 @@ pub(crate) fn decode_table(bytes: &[u8]) -> Result<TableDef> {
             });
         }
     }
+    let mut foreign_keys = Vec::new();
+    if version >= VERSION_WITH_FKS {
+        let fk_count = r.count()?;
+        foreign_keys.reserve(fk_count.min(64));
+        for _ in 0..fk_count {
+            let name = r.string()?;
+            let col_count = r.count()?;
+            let mut columns = Vec::with_capacity(col_count.min(16));
+            for _ in 0..col_count {
+                columns.push(r.string()?);
+            }
+            let parent = r.string()?;
+            let pcol_count = r.count()?;
+            let mut parent_columns = Vec::with_capacity(pcol_count.min(16));
+            for _ in 0..pcol_count {
+                parent_columns.push(r.string()?);
+            }
+            let on_delete = action_from(r.byte()?)?;
+            let on_update = action_from(r.byte()?)?;
+            foreign_keys.push(ForeignKey {
+                name,
+                columns,
+                parent,
+                parent_columns,
+                on_delete,
+                on_update,
+            });
+        }
+    }
     if !r.rest.is_empty() {
         return Err(corrupt(CatalogCorruption::TrailingBytes));
     }
@@ -173,6 +224,24 @@ pub(crate) fn decode_table(bytes: &[u8]) -> Result<TableDef> {
         pk,
         checks,
         indexes,
+        foreign_keys,
+    })
+}
+
+fn action_code(action: RefAction) -> u8 {
+    match action {
+        RefAction::Restrict => 1,
+        RefAction::Cascade => 2,
+        RefAction::SetNull => 3,
+    }
+}
+
+fn action_from(code: u8) -> Result<RefAction> {
+    Ok(match code {
+        1 => RefAction::Restrict,
+        2 => RefAction::Cascade,
+        3 => RefAction::SetNull,
+        tag => return Err(corrupt(CatalogCorruption::BadTag { tag })),
     })
 }
 

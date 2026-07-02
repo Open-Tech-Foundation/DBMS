@@ -5,6 +5,40 @@ Per `PLAN.md` §1 rule 6, every resolution of an ambiguity or deviation from
 
 ---
 
+## D32 — Foreign keys ship RESTRICT-only; CASCADE / SET NULL are modelled but deferred
+
+**Phase:** v2 schema power (`PLAN.md` §8.2) · **Status:** accepted
+
+Foreign keys were the first v2 "schema power" item pulled forward. The design
+splits cleanly into a referencing side (child `insert`/`update` must find a
+parent key) and a referenced side (parent `delete`/`update` and `drop table`).
+Both are enforced in the writer (`catalog::job`) under the existing
+validate-then-apply contract, so a rejected key is a guaranteed no-op — the same
+guarantee every other constraint already has. Parent existence is probed against
+the parent's PK tree or the referenced `UNIQUE` index (both O(log n)); referenced
+columns are therefore required at DDL time to be the parent's PK or a unique
+index. `MATCH SIMPLE` (a NULL in any referencing column skips the check) matches
+the row encoding's existing NULL-in-unique-index handling.
+
+**Decision:** enforce **RESTRICT** (the default, and the only *sound-by-refusal*
+action) now, and **reject `CASCADE` / `SET NULL` at DDL time** rather than
+silently ignoring them. Doing cascades correctly requires a read-only closure
+planner (to keep the no-op-on-reject guarantee across a multi-table, possibly
+cyclic cascade) plus full downstream re-validation of every cascaded row against
+its own CHECK / NOT NULL / UNIQUE / outbound-FK constraints and cross-table index
+upkeep — a self-contained increment that deserves its own tests. The actions are
+still modelled (`RefAction`) and persisted (catalog format **v3**), so enabling
+them later is purely additive with no on-disk format change. Referenced-side
+`RESTRICT` on the update path only fires for keys referencing a `UNIQUE` non-PK
+column, since primary keys are immutable in v1 (D-`PkImmutable`).
+
+**Alternatives rejected:** (a) shipping CASCADE half-done, which would either
+break the no-op guarantee mid-cascade or skip downstream constraint checks —
+unsound; (b) enforcing the referenced side by scanning with no DDL requirement on
+the parent columns, which would make every child probe O(n) instead of O(log n).
+
+---
+
 ## D31 — The free-list is rebuilt into fresh pages each commit (crash-safe), not mutated in place
 
 **Phase:** 11 · **Status:** accepted
