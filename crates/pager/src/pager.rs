@@ -20,6 +20,10 @@ struct State {
     meta: Meta,
     /// The meta slot (0 or 1) currently holding committed state.
     active_slot: u64,
+    /// When `Some`, every [`alloc`](Pager::alloc) records the page it hands
+    /// out here. The writer uses this to reclaim the pages a rejected
+    /// transaction allocated (they are unpublished, so freeing them is safe).
+    alloc_log: Option<Vec<PageId>>,
 }
 
 /// Paged access to a single backing store.
@@ -60,6 +64,7 @@ impl<B: IoBackend> Pager<B> {
                 cache: PageCache::new(cache_bytes),
                 meta,
                 active_slot: 0,
+                alloc_log: None,
             }),
             txn_id,
         })
@@ -99,6 +104,7 @@ impl<B: IoBackend> Pager<B> {
                 cache: PageCache::new(cache_bytes),
                 meta,
                 active_slot,
+                alloc_log: None,
             }),
             txn_id,
         })
@@ -142,7 +148,24 @@ impl<B: IoBackend> Pager<B> {
     /// extending the file's high-water mark.
     pub fn alloc(&self) -> Result<PageId> {
         let mut st = self.locked();
-        self.alloc_locked(&mut st)
+        let id = self.alloc_locked(&mut st)?;
+        if let Some(log) = &mut st.alloc_log {
+            log.push(id);
+        }
+        Ok(id)
+    }
+
+    /// Begin recording every page [`alloc`](Self::alloc) hands out, discarding
+    /// any prior recording. The writer calls this before applying a transaction
+    /// so a rejected one's allocations can be reclaimed.
+    pub fn begin_alloc_recording(&self) {
+        self.locked().alloc_log = Some(Vec::new());
+    }
+
+    /// Stop recording allocations and return the pages recorded since
+    /// [`begin_alloc_recording`](Self::begin_alloc_recording).
+    pub fn take_alloc_recording(&self) -> Vec<PageId> {
+        self.locked().alloc_log.take().unwrap_or_default()
     }
 
     /// Return a page to the free list for later reuse.

@@ -49,6 +49,12 @@ pub(crate) struct Writer<B: IoBackend> {
     root: PageId,
     /// Pages superseded by commit `T`, awaiting reclamation: `(T, pages)`.
     pending: Vec<(u64, Vec<PageId>)>,
+    /// Pages a *rejected* transaction allocated. They are unpublished (no root
+    /// ever referenced them), so they can go straight back to the allocator —
+    /// but only inside a committing batch, so the freelist change is made
+    /// durable rather than left ahead of the disk. Freeing them keeps a
+    /// workload of recurring failed transactions from growing the file.
+    orphaned: Vec<PageId>,
 }
 
 impl<B: IoBackend> Writer<B> {
@@ -58,6 +64,7 @@ impl<B: IoBackend> Writer<B> {
             registry,
             root,
             pending: Vec::new(),
+            orphaned: Vec::new(),
         }
     }
 
@@ -84,16 +91,24 @@ impl<B: IoBackend> Writer<B> {
         for req in batch {
             let root_at_start = self.root;
             let freed_at_start = batch_freed.len();
+            // Record this job's allocations so a rejection can reclaim them.
+            self.pager.begin_alloc_recording();
             let mut ctx = WriteCtx {
                 pager: &self.pager,
                 root: &mut self.root,
                 freed: &mut batch_freed,
             };
             match req.job.apply(&mut ctx) {
-                Ok(out) => replies.push((req.resp, Ok(out))),
+                Ok(out) => {
+                    // Allocations of a committed job are reachable from the new
+                    // root; stop tracking them.
+                    let _ = self.pager.take_alloc_recording();
+                    replies.push((req.resp, Ok(out)));
+                }
                 Err(fatal) if is_fatal(&fatal) => {
                     // Abort the whole batch without committing; nothing applied
                     // here was durable. Tell everyone, then stop the writer.
+                    let _ = self.pager.take_alloc_recording();
                     let _ = req.resp.send(Err(clone_fatal(&fatal)));
                     for (resp, _) in replies {
                         let _ = resp.send(Err(clone_fatal(&fatal)));
@@ -101,11 +116,14 @@ impl<B: IoBackend> Writer<B> {
                     return Err(fatal);
                 }
                 Err(rejected) => {
-                    // The transaction is a no-op: restore the pre-job state
-                    // (defense in depth — a contract-abiding job already left
-                    // both untouched).
+                    // The transaction is a no-op: restore the published root and
+                    // the freed list. The pages the job allocated are now
+                    // orphaned (the restored root reaches none of them, and they
+                    // were dropped from `batch_freed` by the truncate) — park
+                    // them to be freed inside the next committing batch.
                     self.root = root_at_start;
                     batch_freed.truncate(freed_at_start);
+                    self.orphaned.extend(self.pager.take_alloc_recording());
                     replies.push((req.resp, Err(rejected)));
                 }
             }
@@ -117,8 +135,11 @@ impl<B: IoBackend> Writer<B> {
             // Return pages no live snapshot can see to the allocator *inside*
             // a committing batch, so the freelist changes ride this commit.
             // (Reclaiming in a batch that ends up not committing would leave
-            // the in-memory freelist ahead of the disk.)
-            if let Err(fatal) = self.reclaim() {
+            // the in-memory freelist ahead of the disk.) Orphaned pages from
+            // rejected transactions are freed here for the same reason.
+            let orphaned = std::mem::take(&mut self.orphaned);
+            let cleanup = self.reclaim().and_then(|()| self.free_pages(orphaned));
+            if let Err(fatal) = cleanup {
                 for (resp, _) in replies {
                     let _ = resp.send(Err(clone_fatal(&fatal)));
                 }
@@ -147,6 +168,16 @@ impl<B: IoBackend> Writer<B> {
         for (resp, outcome) in replies {
             let msg = outcome.map(|out| (committed_txn, out));
             let _ = resp.send(msg);
+        }
+        Ok(())
+    }
+
+    /// Return a set of pages to the allocator immediately. Used to reclaim the
+    /// (unpublished) pages a rejected transaction allocated — unlike `reclaim`,
+    /// no watermark check is needed because no snapshot ever saw them.
+    fn free_pages(&self, pages: Vec<PageId>) -> Result<()> {
+        for page in pages {
+            self.pager.free(page)?;
         }
         Ok(())
     }

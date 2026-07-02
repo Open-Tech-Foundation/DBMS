@@ -13,12 +13,13 @@ use crate::{Op, Result, TxnError};
 ///
 /// # Contract: validate, then apply
 ///
-/// A job must perform **all validation before its first mutation** (the same
+/// A job should perform **all validation before its first mutation** (the same
 /// discipline as `DECISIONS.md` D8). Returning an error rejects the whole
 /// transaction: the writer restores the root and the freed-page list to their
-/// pre-job state, so a contract-abiding job is all-or-nothing. A job that
-/// mutates and *then* fails leaks the pages it allocated (they are never
-/// published, never read — but never reclaimed either).
+/// pre-job state *and* returns every page the job allocated to the allocator,
+/// so a rejected transaction is a no-op that reclaims its own scratch space —
+/// even one (like a multi-op batch) that mutated before failing. Validate-first
+/// is still preferred, since it avoids the allocate/free churn entirely.
 ///
 /// Errors whose [category](common::CategorizedError) is `Io` or `Corruption`
 /// are **fatal**: the writer stops and the database becomes unwritable.

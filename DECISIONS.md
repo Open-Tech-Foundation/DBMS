@@ -5,6 +5,31 @@ Per `PLAN.md` §1 rule 6, every resolution of an ambiguity or deviation from
 
 ---
 
+## D28 — A rejected transaction reclaims the pages it allocated
+
+**Phase:** 11 · **Status:** accepted
+
+D8 makes single ops validate-then-apply, so a rejection is a no-op that touches
+no pages. But the atomic multi-op batch (`catalog::batch`) runs its ops in
+sequence: if op 3 fails validation, ops 1–2 have already mutated the CoW tree.
+The writer restores the published root (atomicity holds — nothing op 1–2 wrote
+is reachable or durable), but the fresh pages ops 1–2 allocated were neither
+published nor reclaimed. With no compaction in v1, a workload of recurring
+failed batches would grow the file: `meta.page_count` counts those pages, but
+nothing ever returns them to the free list.
+
+**Decision:** the pager records the pages each transaction allocates
+(`begin_alloc_recording` / `take_alloc_recording`), and on rejection the writer
+parks them in an `orphaned` list. Because they are unpublished, they are safe to
+free immediately — but, like superseded pages ([[D7]]) and reclaimed pages, they
+are freed **inside a committing batch** so the free-list change is made durable
+rather than left ahead of the disk (the same invariant that moved `reclaim` into
+the commit branch). A rejected transaction is therefore a true no-op that
+reclaims its own scratch space. Validate-then-apply is still preferred, since it
+avoids the allocate-then-free churn; this only bounds the cost when a job cannot.
+
+---
+
 ## D27 — Public API shape: a cursor owns its snapshot; DDL sits on `Database`
 
 **Phase:** 10 · **Status:** accepted

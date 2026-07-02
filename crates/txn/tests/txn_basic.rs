@@ -4,8 +4,49 @@
 
 use std::sync::Arc;
 
-use common::MemoryBackend;
-use txn::{Db, Op};
+use common::{CategorizedError, ErrorCategory, IoBackend, MemoryBackend};
+use txn::{Db, JobDb, Op, TxnError, WriteCtx, WriteJob};
+
+/// A non-fatal rejection error for the mutate-then-fail test job.
+#[derive(Debug)]
+struct Boom;
+
+impl std::fmt::Display for Boom {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("boom")
+    }
+}
+
+impl std::error::Error for Boom {}
+
+impl CategorizedError for Boom {
+    fn category(&self) -> ErrorCategory {
+        ErrorCategory::Constraint
+    }
+}
+
+/// A write job that inserts a key (allocating fresh pages) and then, if
+/// `reject` is set, rejects — violating validate-then-apply on purpose. A
+/// rejected instance is the worst case for page reclamation: the pages it
+/// allocated are unpublished and must be returned to the allocator.
+struct Mutate {
+    key: Vec<u8>,
+    reject: bool,
+}
+
+impl<B: IoBackend> WriteJob<B> for Mutate {
+    type Out = ();
+
+    fn apply(self, ctx: &mut WriteCtx<'_, B>) -> txn::Result<()> {
+        let root = ctx.insert(ctx.root(), &self.key, &[0u8; 64])?;
+        ctx.set_root(root);
+        if self.reject {
+            Err(TxnError::Rejected(Box::new(Boom)))
+        } else {
+            Ok(())
+        }
+    }
+}
 
 #[test]
 fn writes_are_readable_and_survive_reopen() {
@@ -107,6 +148,61 @@ fn a_rejected_transaction_does_not_desync_reclamation() {
         db.snapshot().get(b"k").unwrap().as_deref(),
         Some(&[3u8; 64][..])
     );
+}
+
+#[test]
+fn a_rejected_mutating_transaction_reclaims_its_pages() {
+    // A transaction that mutates and *then* fails leaves the CoW pages it
+    // allocated unpublished. The writer must return them to the allocator (at
+    // the next commit) so a stream of failed transactions cannot grow the file
+    // without bound.
+    let db: JobDb<_, Mutate> = JobDb::create(MemoryBackend::new()).unwrap();
+    let commit = |k: &[u8]| {
+        db.submit(Mutate {
+            key: k.to_vec(),
+            reject: false,
+        })
+        .unwrap();
+    };
+    let fail = || {
+        assert!(db
+            .submit(Mutate {
+                key: b"x".to_vec(),
+                reject: true,
+            })
+            .is_err());
+    };
+
+    // A streak of failed transactions followed by a commit that reclaims their
+    // orphaned pages. Run it once to reach the allocator's steady state.
+    for _ in 0..100 {
+        fail();
+    }
+    commit(b"a");
+    commit(b"a"); // settle reclamation of the prior commit's superseded pages
+    db.validate().unwrap();
+    let steady = db.validate().unwrap().page_count;
+
+    // A second, identical streak reuses the pages freed at the first commit
+    // rather than extending the file. Were the orphans leaked, another 100
+    // failures would add ~100 pages; the only permitted growth is a page or
+    // two of reclamation lag.
+    for _ in 0..100 {
+        fail();
+    }
+    commit(b"b");
+    commit(b"b");
+    let after = db.validate().unwrap().page_count;
+    assert!(
+        after <= steady + 3,
+        "rejected transactions leaked pages: grew from {steady} to {after} over 100 failures"
+    );
+
+    // And committed data is intact.
+    let snap = db.snapshot();
+    assert_eq!(snap.get(b"a").unwrap().as_deref(), Some(&[0u8; 64][..]));
+    assert_eq!(snap.get(b"b").unwrap().as_deref(), Some(&[0u8; 64][..]));
+    assert_eq!(snap.get(b"x").unwrap(), None);
 }
 
 #[test]

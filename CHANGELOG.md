@@ -8,6 +8,16 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 
 ## [Unreleased]
 
+### Phase 11 — Hardening
+
+#### Fixed
+- `txn`: a **rejected transaction now reclaims the pages it allocated**. A
+  multi-op batch that mutates and then fails (violating validate-then-apply)
+  used to leak its copy-on-write pages — unpublished but never freed, growing
+  the file. The pager records each transaction's allocations and the writer
+  returns a rejected job's pages to the free list inside the next committing
+  batch (D28).
+
 ### Phase 10 — Public API & tools
 
 #### Added
