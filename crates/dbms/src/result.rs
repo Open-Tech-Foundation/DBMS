@@ -67,6 +67,7 @@ impl CategorizedError for DecodeError {
 /// assert_eq!(row.get_i64("id").unwrap(), Some(1));
 /// assert_eq!(row.get_text("name").unwrap(), Some("Ada"));
 /// ```
+#[derive(Debug)]
 pub struct Response {
     inner: QueryResult,
 }

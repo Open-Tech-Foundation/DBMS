@@ -8,9 +8,17 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 
 ## [Unreleased]
 
-### Phase 11 — Hardening
+### Phase 11 — Playgrounds, hardening & benchmarking
 
 #### Added
+- Acceptance scenarios (`PLAN.md` §7) driven end-to-end through the public
+  `otf_dbms` API: indexed lookup verified via EXPLAIN (2), a three-table INNER
+  join + GROUP BY matching across both the pipeline and clause surfaces (3), the
+  bank scenario under concurrency (5), optimistic version-guard first-committer-
+  wins (6), and guard-rule enforcement (7). (1 and 4 already covered in `api.rs`.)
+- `otf-dbms`: re-export `CheckExpr` (and `catalog::CmpOp` as `CheckCmpOp`) so
+  `CHECK` constraints are declarable through the public API alone; `Response`
+  now derives `Debug`.
 - `query`: **per-query resource caps** (`ResourceLimits`) enforced by the
   streaming executor — a row cap at every materialization point (bounds sort,
   group, distinct, join inner side, and the final page), a join-count cap, and

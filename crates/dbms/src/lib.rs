@@ -52,8 +52,10 @@ pub use inspect::{Inspection, IntegrityReport, TableInfo};
 pub use result::{DecodeError, Response, Row};
 
 // Re-export the schema, request, and value types so a caller can build and read
-// everything through `otf_dbms` alone.
-pub use catalog::{ColumnDef, IndexDef, TableDef};
+// everything through `otf_dbms` alone. `catalog::CmpOp` (the CHECK comparison
+// operator) is aliased to `CheckCmpOp` so it does not collide with the
+// expression-grammar `proto::CmpOp` re-exported below.
+pub use catalog::{CheckExpr, CmpOp as CheckCmpOp, ColumnDef, IndexDef, TableDef};
 pub use proto::{
     AggFunc, ArithOp, ClauseSelect, CmpOp, Delete, Dir, Expr, Insert, JoinKind, JoinSpec,
     Projection, QueryResult, Request, Select, Selector, SortKey, Stage, TableRef, Update,
