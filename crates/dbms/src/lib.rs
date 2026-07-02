@@ -45,6 +45,10 @@ mod result;
 use common::CategorizedError;
 
 pub use common::ErrorCategory;
+// The storage backend trait `Database` is generic over, plus the in-memory
+// backend, so callers can name the `Database<B>` bound and build test/embedded
+// instances through `otf_dbms` alone.
+pub use common::{IoBackend, MemoryBackend};
 
 pub use cursor::Cursor;
 pub use db::Database;
