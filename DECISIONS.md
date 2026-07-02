@@ -35,8 +35,9 @@ secondary-index upkeep. Termination holds: each row is recorded at most once, an
 immutable, so `on_update` only fires for a key referencing an *updatable* `UNIQUE`
 non-PK column — a niche — and a cascading key change could have to move a child's
 own primary key (which v1 forbids, `PkImmutable`). The actions remain modelled
-(`RefAction`) and persisted (catalog format **v3**), so enabling them later is
-additive with no on-disk change.
+(`RefAction`) and persisted in the catalog record, so enabling them later needs
+no on-disk change. (The engine is pre-release, so the stored format evolves in
+place behind its single version byte — no legacy-decode paths are carried.)
 
 **Alternatives rejected:** (a) applying cascades eagerly row-by-row, which would
 break the no-op guarantee when a downstream RESTRICT or SET-NULL-violates-CHECK is

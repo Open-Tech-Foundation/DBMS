@@ -28,8 +28,10 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
   - `on_update` is `RESTRICT`-only for now (primary keys are immutable, so it
     only fires for a key referencing a `UNIQUE` non-PK column); `on_update`
     `CASCADE`/`SET NULL` are rejected at DDL time (D32).
-- Catalog on-disk format bumped to **v3** (the foreign-key section); v1/v2
-  records still decode.
+- Catalog record format gained a foreign-key section. The engine is pre-release,
+  so the stored format still evolves in place behind its single version byte (no
+  legacy-decode paths); a record is either the current version or rejected as
+  corrupt.
 - `otf-dbms`: re-export `ForeignKey` and `RefAction`.
 
 ### Phase 11 — Playgrounds, hardening & benchmarking

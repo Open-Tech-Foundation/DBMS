@@ -13,16 +13,12 @@ use crate::schema::{
 };
 use crate::{CatalogCorruption, CatalogError, Result};
 
-/// Current stored-format version. History (older records still decode):
-/// - v1: base columns, pk, checks.
-/// - v2: added the secondary-index section (Phase 7).
-/// - v3: added the foreign-key section.
-const VERSION: u8 = 3;
-const MIN_VERSION: u8 = 1;
-/// Records at or above this version carry the index section.
-const VERSION_WITH_INDEXES: u8 = 2;
-/// Records at or above this version carry the foreign-key section.
-const VERSION_WITH_FKS: u8 = 3;
+/// Stored-format version byte, prefixing every record. The engine is
+/// pre-release, so there are no persisted databases with an older layout — the
+/// format evolves freely in place and a record is either the current version or
+/// rejected as corrupt. The byte stays so real compatibility handling can be
+/// added once the format is frozen for release.
+const VERSION: u8 = 1;
 
 const FLAG_NULLABLE: u8 = 1 << 0;
 const FLAG_UNIQUE: u8 = 1 << 1;
@@ -120,7 +116,7 @@ pub(crate) fn encode_table(def: &TableDef) -> Result<Vec<u8>> {
 pub(crate) fn decode_table(bytes: &[u8]) -> Result<TableDef> {
     let mut r = Reader { rest: bytes };
     let version = r.byte()?;
-    if !(MIN_VERSION..=VERSION).contains(&version) {
+    if version != VERSION {
         return Err(corrupt(CatalogCorruption::BadVersion { version }));
     }
     let name = r.string()?;
@@ -163,57 +159,51 @@ pub(crate) fn decode_table(bytes: &[u8]) -> Result<TableDef> {
     for _ in 0..check_count {
         checks.push(r.check(0)?);
     }
-    let mut indexes = Vec::new();
-    if version >= VERSION_WITH_INDEXES {
-        let index_count = r.count()?;
-        indexes.reserve(index_count.min(64));
-        for _ in 0..index_count {
-            let name = r.string()?;
-            let unique = match r.byte()? {
-                0 => false,
-                1 => true,
-                tag => return Err(corrupt(CatalogCorruption::BadTag { tag })),
-            };
-            let col_count = r.count()?;
-            let mut cols = Vec::with_capacity(col_count.min(16));
-            for _ in 0..col_count {
-                cols.push(r.string()?);
-            }
-            indexes.push(IndexDef {
-                name,
-                columns: cols,
-                unique,
-            });
+    let index_count = r.count()?;
+    let mut indexes = Vec::with_capacity(index_count.min(64));
+    for _ in 0..index_count {
+        let name = r.string()?;
+        let unique = match r.byte()? {
+            0 => false,
+            1 => true,
+            tag => return Err(corrupt(CatalogCorruption::BadTag { tag })),
+        };
+        let col_count = r.count()?;
+        let mut cols = Vec::with_capacity(col_count.min(16));
+        for _ in 0..col_count {
+            cols.push(r.string()?);
         }
+        indexes.push(IndexDef {
+            name,
+            columns: cols,
+            unique,
+        });
     }
-    let mut foreign_keys = Vec::new();
-    if version >= VERSION_WITH_FKS {
-        let fk_count = r.count()?;
-        foreign_keys.reserve(fk_count.min(64));
-        for _ in 0..fk_count {
-            let name = r.string()?;
-            let col_count = r.count()?;
-            let mut columns = Vec::with_capacity(col_count.min(16));
-            for _ in 0..col_count {
-                columns.push(r.string()?);
-            }
-            let parent = r.string()?;
-            let pcol_count = r.count()?;
-            let mut parent_columns = Vec::with_capacity(pcol_count.min(16));
-            for _ in 0..pcol_count {
-                parent_columns.push(r.string()?);
-            }
-            let on_delete = action_from(r.byte()?)?;
-            let on_update = action_from(r.byte()?)?;
-            foreign_keys.push(ForeignKey {
-                name,
-                columns,
-                parent,
-                parent_columns,
-                on_delete,
-                on_update,
-            });
+    let fk_count = r.count()?;
+    let mut foreign_keys = Vec::with_capacity(fk_count.min(64));
+    for _ in 0..fk_count {
+        let name = r.string()?;
+        let col_count = r.count()?;
+        let mut columns = Vec::with_capacity(col_count.min(16));
+        for _ in 0..col_count {
+            columns.push(r.string()?);
         }
+        let parent = r.string()?;
+        let pcol_count = r.count()?;
+        let mut parent_columns = Vec::with_capacity(pcol_count.min(16));
+        for _ in 0..pcol_count {
+            parent_columns.push(r.string()?);
+        }
+        let on_delete = action_from(r.byte()?)?;
+        let on_update = action_from(r.byte()?)?;
+        foreign_keys.push(ForeignKey {
+            name,
+            columns,
+            parent,
+            parent_columns,
+            on_delete,
+            on_update,
+        });
     }
     if !r.rest.is_empty() {
         return Err(corrupt(CatalogCorruption::TrailingBytes));
