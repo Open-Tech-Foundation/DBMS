@@ -146,8 +146,11 @@ pub(crate) fn pk_lookup<B: IoBackend>(
     Ok(Relation { shape, rows })
 }
 
-/// A base-table scan; when `index` is set, rows are filtered to an equality
-/// prefix on the indexed columns — the same rows a real index seek returns.
+/// A base-table scan. When `index` is set, the index tree is range-probed for
+/// the prefix's candidate rows (O(log n + matches)) instead of scanning the
+/// whole table; the exact equality retain below then defines the result, so the
+/// rows are identical to a full scan of the same predicate — just far fewer are
+/// fetched. An empty prefix or an unknown index falls back to a full scan.
 pub(crate) fn scan<B: IoBackend>(
     snap: &CatSnapshot<B>,
     table: &str,
@@ -161,7 +164,14 @@ pub(crate) fn scan<B: IoBackend>(
         shape.push(Some(qualifier.to_string()), col.name.clone());
     }
 
-    let mut rows = snap.scan(table)?;
+    let mut rows = match index {
+        Some((index_name, prefix))
+            if !prefix.is_empty() && def.indexes.iter().any(|i| i.name == index_name) =>
+        {
+            snap.index_candidates(table, index_name, prefix)?
+        }
+        _ => snap.scan(table)?,
+    };
     if let Some((index_name, prefix)) = index {
         if let Some(idx) = def.indexes.iter().find(|i| i.name == index_name) {
             let cols: Vec<usize> = idx

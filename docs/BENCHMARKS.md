@@ -26,7 +26,7 @@ timings.
 | Bench | What it exercises |
 |---|---|
 | `point_read/pk_lookup` | `WHERE id = k` on the primary key → a base-tree point lookup (`Plan::PkLookup`) |
-| `point_read/secondary_eq` | `WHERE val = k` on an indexed non-PK column — still a full scan + filter (see below) |
+| `point_read/secondary_eq` | `WHERE val = k` on an indexed non-PK column → an index-tree seek |
 | `full_scan/100k` | scan + materialize every row of a 100k-row table |
 | `insert_1k/serial` | 1 000 single-row inserts = 1 000 transactions |
 | `insert_1k/batch` | the same 1 000 rows in one request = one transaction |
@@ -41,26 +41,30 @@ Numbers are indicative on shared hardware — treat criterion's saved baselines 
 the source of truth for regression comparisons.
 
 <!-- BASELINE:START -->
-| Access path | Cost per op (100k-row table) |
-|---|---|
-| `point_read/pk_lookup` (PK point lookup) | **~19 µs** |
-| `point_read/secondary_eq` (non-PK equality, full scan) | ~34 ms |
+| Access path | Cost per op | vs. full scan |
+|---|---|---|
+| `point_read/pk_lookup` — PK point lookup (100k rows) | **~19 µs** | ~1700× |
+| `point_read/secondary_eq` — indexed non-PK seek (10k rows) | **~135 µs** | ~25× |
 
-The primary-key point lookup is ~1700× faster than the equivalent full scan on a
-100k-row table — the direct payoff of the `Plan::PkLookup` access path (D33).
+Both equality access paths are now O(log n) index/base-tree seeks rather than
+full scans (D33). The PK figure is at 100k rows; the secondary figure is at 10k
+(index-build setup dominates a 100k measurement — see the note on write costs
+below). The scan they replace is O(rows), so the speedup grows with table size.
 <!-- BASELINE:END -->
 
 ## Reading the baseline
 
-- **PK equality is now a point lookup.** A `WHERE pk = k` that pins every
-  primary-key column plans as `Plan::PkLookup` and executes as a single base-tree
-  `get` — O(log n), ~19 µs above (D33).
-- **Secondary-index equality is still a full scan** — the next access-path
-  optimization. `query::plan::index_select` emits `Plan::IndexScan`, but the
-  executor (`exec::scan`) still materializes the whole table and filters to the
-  index prefix rather than probing the index tree. Teaching the executor to seek
-  the index tree (values → PK keys → base rows) would give secondary lookups the
-  same O(log n) the PK lookup now has.
+- **PK equality is a point lookup.** A `WHERE pk = k` that pins every primary-key
+  column plans as `Plan::PkLookup` and executes as a single base-tree `get` —
+  O(log n) (D33).
+- **Secondary-index equality is an index seek.** `Plan::IndexScan` is served by
+  `CatSnapshot::index_candidates`: the index tree is range-probed for the
+  matching primary keys, the base rows are fetched, and the exact equality is
+  applied — O(log n + matches) instead of a full scan.
+- **Known slow paths (next targets):** large batch `insert` and `create_index`
+  backfill are slow at scale (a 10k-row unique-index build is ~1.4 s), which is
+  why the secondary bench is measured at 10k. These are separate write-path
+  optimizations, independent of the read access paths above.
 - `insert_1k/serial` vs `insert_1k/batch` is the per-transaction commit
   overhead. On this in-memory backend it isolates the CoW + meta-swap cost; a
   file backend would add fsync latency per commit (a future file-backed

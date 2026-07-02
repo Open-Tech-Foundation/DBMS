@@ -41,12 +41,16 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 ### Phase 11 — Playgrounds, hardening & benchmarking
 
 #### Added
-- **Primary-key point lookups** (`Plan::PkLookup`, D33). The planner now
-  recognizes a filter that pins every primary-key column to an equality value
-  and emits a base-tree point lookup; the executor serves it with a single
-  `get` instead of a full scan + filter. Surfaced by the new bench suite — a PK
-  lookup on a 100k-row table drops from ~34 ms to ~19 µs (~1700×). (Secondary
-  indexes are still executed as full scans — the next access-path step.)
+- **Real seek access paths** (D33). Equality lookups now probe a tree instead of
+  scanning the whole table:
+  - **Primary-key point lookup** (`Plan::PkLookup`): a filter pinning every PK
+    column to an equality plans as a base-tree `get` — ~34 ms → ~19 µs on 100k
+    rows (~1700×).
+  - **Secondary-index seek**: `Plan::IndexScan` is served by
+    `CatSnapshot::index_candidates`, range-probing the index tree for the
+    matching primary keys and fetching those base rows — ~34 ms → ~135 µs (~25×
+    at 10k rows). Results and order are identical to the scan (equivalence tests
+    cover it). Range predicates still scan — a further access-path step.
 - **Criterion bench suite** (`crates/dbms/benches/engine.rs`, `PLAN.md` §3.8):
   point read (PK equality + secondary seek), full scan, serial vs batch insert,
   guarded update, INNER join + GROUP BY, and standalone GROUP BY — all through

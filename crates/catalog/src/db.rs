@@ -277,6 +277,40 @@ impl<B: IoBackend> CatSnapshot<B> {
         Ok(rows)
     }
 
+    /// Candidate rows for the leading `prefix` of `index`, in **primary-key
+    /// order**, each in schema column order. Range-probes the index tree
+    /// (O(log n + matches)) for the primary keys whose indexed columns start
+    /// with `prefix`, then fetches those base rows — the access path behind a
+    /// planned `IndexScan`. The prefix is a *superset* filter (encoding-equal
+    /// leading columns); callers apply the exact equality themselves, so the
+    /// result set matches a full scan of the same predicate.
+    pub fn index_candidates(
+        &self,
+        table: &str,
+        index: &str,
+        prefix: &[Value],
+    ) -> Result<Vec<Vec<Value>>> {
+        let def = self.table(table)?;
+        let iroot = self.index_root(table, index)?;
+        let (lo, hi) = index::prefix_bounds(prefix)?;
+        // The index entry's value is the base row's primary key.
+        let mut pk_keys: Vec<Vec<u8>> = self
+            .snap
+            .range_in(iroot, Some(&lo), hi.as_deref())?
+            .into_iter()
+            .map(|(_entry, pk)| pk)
+            .collect();
+        pk_keys.sort(); // encoded PKs sort into base-tree (scan) order
+        let data_root = self.data_root(table)?;
+        let mut rows = Vec::with_capacity(pk_keys.len());
+        for pk in pk_keys {
+            if let Some(bytes) = self.snap.get_in(data_root, &pk)? {
+                rows.push(decode_padded(&def, &bytes)?);
+            }
+        }
+        Ok(rows)
+    }
+
     /// Cross-check the whole database: every tree is structurally valid and
     /// **every index matches its base table entry-for-entry** (the Phase 7
     /// exit criterion). Read-only, over this snapshot's pinned version.

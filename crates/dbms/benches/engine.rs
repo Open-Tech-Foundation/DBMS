@@ -107,10 +107,10 @@ fn point_read(c: &mut Criterion) {
         b.iter(|| black_box(db.execute(black_box(&pk_eq)).unwrap().len()));
     });
 
-    // (2) Equality on an indexed *non-PK* column. NOTE: the executor still
-    // serves `Plan::IndexScan` as a full scan + filter (the index picks the
-    // rows logically but is not yet used as a physical seek), so this is O(rows)
-    // — the next access-path optimization after the PK lookup above.
+    // (2) Equality on an indexed *non-PK* column → a real index-tree seek
+    // (`Plan::IndexScan` served by `CatSnapshot::index_candidates`): the index
+    // is range-probed for the matching primary keys, then the base rows are
+    // fetched — O(log n + matches).
     let db2 = users_db(n);
     db2.create_index("users", IndexDef::new("by_val", vec!["val"]).unique())
         .unwrap();

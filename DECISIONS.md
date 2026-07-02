@@ -25,12 +25,20 @@ wire-serialized), so the new node is free of compatibility concerns, and the
 "planned == reference" equivalence tests already cover correctness (`PkLookup`
 returns the same row as `Scan` + `Filter`). Result: ~19 µs, ~1700× faster.
 
-**Scope:** full-PK equality only. A partial-PK prefix or a range (`pk > k`) still
-scans, and **secondary-index access is still executed as a full scan + filter**
-(`exec::scan` materializes the table and retains the prefix rather than probing
-the index tree). Making the executor seek secondary index trees — and extending
-the base tree to PK ranges — is the next access-path optimization; the bench
-suite (`point_read/secondary_eq`) measures the current gap.
+**Secondary-index seeks followed** (same commit family): `exec::scan` now serves
+a planned `Plan::IndexScan` by range-probing the index tree for the prefix's
+primary keys (`CatSnapshot::index_candidates`) and fetching those base rows,
+rather than scanning the whole table and retaining the prefix. The probe is a
+*superset* filter over encoding-equal leading columns, so the exact equality
+retain still runs on the (small) candidate set — results and order are identical
+to the full scan, proven by the planned==reference equivalence tests.
+`point_read/secondary_eq` drops from ~34 ms to ~135 µs (10k rows).
+
+**Still scans:** a partial-PK prefix or a range predicate (`pk > k`, `col > k`).
+Extending both trees to range access paths is a further optimization. Separately,
+the write path is slow at scale — large batch `insert` and `create_index`
+backfill (a 10k unique-index build is ~1.4 s) are the next write-side targets,
+independent of these read paths.
 
 ---
 
