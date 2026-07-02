@@ -37,6 +37,11 @@
 //! assert_eq!(out.row(0).unwrap().get_text("text").unwrap(), Some("hi"));
 //! ```
 
+// Compile the README's quick-start as a doctest so it can never rot.
+#[doc = include_str!("../../../README.md")]
+#[cfg(doctest)]
+struct ReadmeDoctests;
+
 mod cursor;
 mod db;
 mod inspect;
