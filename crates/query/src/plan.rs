@@ -51,7 +51,7 @@ fn table_def<S: crate::SchemaView>(schema: &S, table: &str) -> Result<TableDef, 
 /// Bottom-up rewrite: optimize children, then apply the local rule.
 fn optimize<S: crate::SchemaView>(plan: &Plan, schema: &S) -> Result<Plan, CatalogError> {
     Ok(match plan {
-        Plan::Scan { .. } | Plan::IndexScan { .. } => plan.clone(),
+        Plan::Scan { .. } | Plan::IndexScan { .. } | Plan::PkLookup { .. } => plan.clone(),
         Plan::Filter { input, pred } => {
             let input = optimize(input, schema)?;
             build_filter(input, pred.clone(), schema)?
@@ -138,6 +138,31 @@ fn index_select<S: crate::SchemaView>(
     for (i, c) in conjuncts.iter().enumerate() {
         if let Some((name, value)) = equality_on(c, qualifier) {
             eqs.push((name, value, i));
+        }
+    }
+
+    // Best access path first: if the equalities pin *every* primary-key column,
+    // the base tree serves it as a single-row point lookup — strictly better
+    // than any secondary index (no indirection, at most one row).
+    if !def.pk.is_empty() {
+        let mut key = Vec::with_capacity(def.pk.len());
+        let mut consumed = Vec::new();
+        for pk_col in &def.pk {
+            let Some((_, value, ci)) = eqs.iter().find(|(n, _, _)| n == pk_col) else {
+                key.clear();
+                break;
+            };
+            key.push(value.clone());
+            consumed.push(*ci);
+        }
+        if key.len() == def.pk.len() {
+            let residual: Vec<Expr> = conjuncts
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| !consumed.contains(i))
+                .map(|(_, e)| e)
+                .collect();
+            return Ok(wrap_filter(Plan::PkLookup { table, alias, key }, residual));
         }
     }
 
@@ -289,7 +314,9 @@ fn exposed<S: crate::SchemaView>(
     schema: &S,
 ) -> Result<Vec<(Option<String>, String)>, CatalogError> {
     Ok(match plan {
-        Plan::Scan { table, alias } | Plan::IndexScan { table, alias, .. } => {
+        Plan::Scan { table, alias }
+        | Plan::IndexScan { table, alias, .. }
+        | Plan::PkLookup { table, alias, .. } => {
             let def = table_def(schema, table)?;
             let qualifier = alias.clone().unwrap_or_else(|| table.clone());
             def.columns
@@ -426,6 +453,14 @@ fn render_node(plan: &Plan, depth: usize, out: &mut String) {
             let vals: Vec<String> = prefix.iter().map(render_value).collect();
             out.push_str(&format!(
                 "IndexScan {table}{} using {index} prefix=[{}]\n",
+                alias_suffix(alias),
+                vals.join(", ")
+            ));
+        }
+        Plan::PkLookup { table, alias, key } => {
+            let vals: Vec<String> = key.iter().map(render_value).collect();
+            out.push_str(&format!(
+                "PkLookup {table}{} key=[{}]\n",
                 alias_suffix(alias),
                 vals.join(", ")
             ));

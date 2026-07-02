@@ -26,6 +26,12 @@ otf-dbms = { path = "crates/dbms" }
 
 # External, vetted dependencies.
 thiserror = "2"
+# Bench harness (dev-only). Default features (plotters, rayon) are off to keep
+# the dependency tree small and the license audit clean; `cargo_bench_support`
+# is what `cargo bench` needs.
+criterion = { version = "0.5", default-features = false, features = [
+    "cargo_bench_support",
+] }
 
 # Operating rule 3: no unwrap/expect/panic in library paths. Enforced
 # mechanically here; clippy.toml relaxes these inside test code only.

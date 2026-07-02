@@ -29,7 +29,7 @@ use types::Value;
 use catalog::CatSnapshot;
 
 use crate::eval::{eval, eval_predicate, value_order, Shape};
-use crate::exec::{aggregate, distinct, scan, sort, Relation};
+use crate::exec::{aggregate, distinct, pk_lookup, scan, sort, Relation};
 use crate::ExecError;
 
 type Row = Vec<Value>;
@@ -211,6 +211,9 @@ fn build<B: IoBackend>(plan: &Plan, snap: &CatSnapshot<B>, budget: &Budget) -> R
             index,
             prefix,
         } => from_relation(scan(snap, table, alias.as_deref(), Some((index, prefix)))?),
+        Plan::PkLookup { table, alias, key } => {
+            from_relation(pk_lookup(snap, table, alias.as_deref(), key)?)
+        }
         Plan::Filter { input, pred } => {
             let child = build(input, snap, budget)?;
             let shape = child.shape.clone();
@@ -403,7 +406,7 @@ fn check_join_count(plan: &Plan, limits: &ResourceLimits) -> Result<()> {
 /// The number of join operators anywhere in a plan tree.
 fn count_joins(plan: &Plan) -> u32 {
     match plan {
-        Plan::Scan { .. } | Plan::IndexScan { .. } => 0,
+        Plan::Scan { .. } | Plan::IndexScan { .. } | Plan::PkLookup { .. } => 0,
         Plan::Join { left, right, .. } => 1 + count_joins(left) + count_joins(right),
         Plan::Filter { input, .. }
         | Plan::Project { input, .. }

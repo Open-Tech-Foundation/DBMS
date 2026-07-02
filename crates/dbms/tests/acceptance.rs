@@ -126,6 +126,49 @@ fn indexed_lookup_uses_a_seek_and_matches_a_scan() {
     assert_eq!(via_index, expected);
 }
 
+#[test]
+fn primary_key_equality_uses_a_point_lookup() {
+    // `WHERE pk = k` must plan as a base-tree point lookup (`PkLookup`), not a
+    // full scan + filter, and return exactly that row.
+    let db = Database::create_memory().unwrap();
+    db.create_table(TableDef::new(
+        "users",
+        vec![
+            ColumnDef::new("id", TypeKind::I64),
+            ColumnDef::new("dept", TypeKind::I64).not_null(),
+        ],
+        vec!["id"],
+    ))
+    .unwrap();
+    for id in 1..=20 {
+        insert(&db, "users", vec![("id", id), ("dept", id % 4)]);
+    }
+
+    let by_id = Select::Pipeline(vec![
+        Stage::Scan(tref("users")),
+        Stage::Match(cmp(CmpOp::Eq, col("id"), lit(7))),
+    ]);
+
+    let explain = db.execute(&Request::Explain(by_id.clone())).unwrap();
+    let plan_text: String = explain
+        .rows()
+        .map(|r| r.get_text("plan").unwrap().unwrap().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        plan_text.contains("PkLookup"),
+        "expected a PK point lookup, got plan:\n{plan_text}"
+    );
+
+    let rows: Vec<i64> = db
+        .execute(&Request::Select(by_id))
+        .unwrap()
+        .rows()
+        .map(|r| r.get_i64("id").unwrap().unwrap())
+        .collect();
+    assert_eq!(rows, vec![7]);
+}
+
 // --- scenario 3: join + group, both surfaces ---------------------------------
 
 /// Build the three-table join + group query in the pipeline surface:

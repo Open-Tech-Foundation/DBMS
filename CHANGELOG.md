@@ -41,6 +41,18 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 ### Phase 11 — Playgrounds, hardening & benchmarking
 
 #### Added
+- **Primary-key point lookups** (`Plan::PkLookup`, D33). The planner now
+  recognizes a filter that pins every primary-key column to an equality value
+  and emits a base-tree point lookup; the executor serves it with a single
+  `get` instead of a full scan + filter. Surfaced by the new bench suite — a PK
+  lookup on a 100k-row table drops from ~34 ms to ~19 µs (~1700×). (Secondary
+  indexes are still executed as full scans — the next access-path step.)
+- **Criterion bench suite** (`crates/dbms/benches/engine.rs`, `PLAN.md` §3.8):
+  point read (PK equality + secondary seek), full scan, serial vs batch insert,
+  guarded update, INNER join + GROUP BY, and standalone GROUP BY — all through
+  the public API. A committed baseline and methodology live in
+  `docs/BENCHMARKS.md`; CI compiles the benches on every push and runs them on
+  demand via a `workflow_dispatch` job.
 - Acceptance scenarios (`PLAN.md` §7) driven end-to-end through the public
   `otf_dbms` API: indexed lookup verified via EXPLAIN (2), a three-table INNER
   join + GROUP BY matching across both the pipeline and clause surfaces (3), the

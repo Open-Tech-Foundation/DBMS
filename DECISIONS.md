@@ -5,6 +5,35 @@ Per `PLAN.md` §1 rule 6, every resolution of an ambiguity or deviation from
 
 ---
 
+## D33 — Primary-key equality is a base-tree point lookup (`Plan::PkLookup`)
+
+**Phase:** 11 · **Status:** accepted
+
+The new bench suite showed a `WHERE pk = k` lookup costing ~34 ms on a 100k-row
+table — a full scan. The planner's `index_select` only considered *secondary*
+indexes (`def.indexes`), so a primary-key equality found no candidate and fell
+back to `Scan` + `Filter`. But the base tree **is** the primary-key index (keyed
+by the encoded PK), so the most common query — fetch by primary key — was the
+slowest path.
+
+**Decision:** add a `Plan::PkLookup { table, alias, key }` access path. When a
+filter over a base scan pins **every** primary-key column to an equality value,
+the planner emits `PkLookup` (preferred over any secondary index — one base-tree
+`get`, at most one row) with the leftover conjuncts kept as a residual filter.
+Both executors serve it via `CatSnapshot::get`. The IR is internal (not
+wire-serialized), so the new node is free of compatibility concerns, and the
+"planned == reference" equivalence tests already cover correctness (`PkLookup`
+returns the same row as `Scan` + `Filter`). Result: ~19 µs, ~1700× faster.
+
+**Scope:** full-PK equality only. A partial-PK prefix or a range (`pk > k`) still
+scans, and **secondary-index access is still executed as a full scan + filter**
+(`exec::scan` materializes the table and retains the prefix rather than probing
+the index tree). Making the executor seek secondary index trees — and extending
+the base tree to PK ranges — is the next access-path optimization; the bench
+suite (`point_read/secondary_eq`) measures the current gap.
+
+---
+
 ## D32 — Foreign keys: RESTRICT/CASCADE/SET NULL on both `on_delete` and `on_update`, via a read-only closure planner
 
 **Phase:** v2 schema power (`PLAN.md` §8.2) · **Status:** accepted

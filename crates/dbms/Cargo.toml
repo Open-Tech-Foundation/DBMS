@@ -26,6 +26,11 @@ thiserror.workspace = true
 
 [dev-dependencies]
 common.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "engine"
+harness = false
 
 [lints]
 workspace = true

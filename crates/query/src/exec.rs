@@ -90,6 +90,7 @@ pub fn execute<B: IoBackend>(plan: &Plan, snap: &CatSnapshot<B>) -> Result<Relat
             index,
             prefix,
         } => scan(snap, table, alias.as_deref(), Some((index, prefix))),
+        Plan::PkLookup { table, alias, key } => pk_lookup(snap, table, alias.as_deref(), key),
         Plan::Filter { input, pred } => {
             let rel = execute(input, snap)?;
             let mut rows = Vec::new();
@@ -122,6 +123,27 @@ pub fn execute<B: IoBackend>(plan: &Plan, snap: &CatSnapshot<B>) -> Result<Relat
         // with the pull-based executor (acceptance scenario 4).
         Plan::Cursor { .. } => Err(ExecError::Unsupported { feature: "cursor" }),
     }
+}
+
+/// A primary-key point lookup — a direct base-tree `get` returning the single
+/// row with primary key `key`, or no rows. The real seek behind `Plan::PkLookup`.
+pub(crate) fn pk_lookup<B: IoBackend>(
+    snap: &CatSnapshot<B>,
+    table: &str,
+    alias: Option<&str>,
+    key: &[Value],
+) -> Result<Relation> {
+    let def = snap.table(table)?;
+    let qualifier = alias.unwrap_or(table);
+    let mut shape = Shape::new();
+    for col in &def.columns {
+        shape.push(Some(qualifier.to_string()), col.name.clone());
+    }
+    let rows = match snap.get(table, key)? {
+        Some(row) => vec![row],
+        None => Vec::new(),
+    };
+    Ok(Relation { shape, rows })
 }
 
 /// A base-table scan; when `index` is set, rows are filtered to an equality

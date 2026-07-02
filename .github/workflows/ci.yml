@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -44,6 +45,24 @@ jobs:
         run: cargo test -p txn --test loom_registry --release --locked
         env:
           RUSTFLAGS: --cfg loom -D warnings
+
+  # Benches must always *compile* (the `build --all-targets` step above covers
+  # that), but they only *run* on demand — shared CI runners are too noisy for
+  # trustworthy timings. Trigger this job manually from the Actions tab.
+  bench:
+    name: benchmarks (on demand)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: run criterion suite
+        run: cargo bench -p otf-dbms --bench engine -- --output-format bencher | tee bench-results.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: bench-results.txt
 
   supply-chain:
     name: audit · deny

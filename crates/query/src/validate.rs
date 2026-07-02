@@ -386,9 +386,11 @@ impl RowType {
 /// Validate a plan and return its output row type.
 fn check_plan<S: SchemaView>(plan: &Plan, schema: &S) -> Result<RowType> {
     match plan {
-        // Lowering never emits `IndexScan`; the planner does, and it has the
-        // same output shape as a full scan.
-        Plan::Scan { table, alias } | Plan::IndexScan { table, alias, .. } => {
+        // Lowering never emits `IndexScan` / `PkLookup`; the planner does, and
+        // both have the same output shape as a full scan.
+        Plan::Scan { table, alias }
+        | Plan::IndexScan { table, alias, .. }
+        | Plan::PkLookup { table, alias, .. } => {
             let def = lookup(schema, table)?;
             let qualifier = alias.as_deref().unwrap_or(table);
             Ok(RowType::of_table(&def, qualifier))

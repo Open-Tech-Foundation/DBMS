@@ -36,6 +36,18 @@ pub enum Plan {
         /// (empty = scan the whole index in key order).
         prefix: Vec<Value>,
     },
+    /// A primary-key point lookup: a direct seek to the single row whose full
+    /// primary key equals `key`. Emitted only by the planner, when a filter pins
+    /// every primary-key column to an equality value. The fastest access path —
+    /// one base-tree `get` instead of a full scan and filter.
+    PkLookup {
+        /// The base table.
+        table: String,
+        /// The alias rows are referenced by, if any.
+        alias: Option<String>,
+        /// The full primary key, in key-column order.
+        key: Vec<Value>,
+    },
     /// Keep rows where the predicate is true (`match` / WHERE / HAVING).
     Filter {
         /// The input plan.
