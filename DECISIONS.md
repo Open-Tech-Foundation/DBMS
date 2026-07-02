@@ -239,7 +239,7 @@ avoids the allocate-then-free churn; this only bounds the cost when a job cannot
   error rather than a silently-swallowed `None`. Reading a result wrong is a
   caller bug and should surface as one.
 
-The file tools (`Database::check`, `Database::inspect`, and the `otf-dbms
+The file tools (`Database::check`, `Database::inspect`, and the `otf-edb
 check|inspect <file>` CLI) run entirely over the existing pager + snapshot
 validators; `check` reads every live page, so a corrupted page trips its
 checksum and surfaces as `Corruption`.
@@ -717,7 +717,7 @@ check vector (`crc32c(b"123456789") == 0xE3069283`). No hardware-intrinsic
 (SSE4.2) path for now — portability and a zero-dependency graph over peak
 throughput; revisit if checksum cost shows up in profiling.
 
-## D2 — Public crate is `otf-dbms`; internal crates keep functional names
+## D2 — Public crate is `otf-edb`; internal crates keep functional names
 
 **Phase:** 1 · **Status:** accepted
 
@@ -730,15 +730,15 @@ product name is chosen").
 **Decision:** namespace the **public** crate under the org and keep the internal
 crates short:
 
-- Public crate: package **`otf-dbms`**, directory `crates/dbms`, imported in
-  code as **`otf_dbms`**. This both carries the org namespace and removes the
+- Public crate: package **`otf-edb`**, directory `crates/edb`, imported in
+  code as **`otf_edb`**. This both carries the org namespace and removes the
   `core`/std collision.
 - Internal crates keep their functional names (`common`, `pager`, `btree`,
   `txn`, `types`, `catalog`, `index`, `proto`, `query`) and are unpublished
   (`publish = false`) path dependencies.
-- The CLI binary is named **`otf-dbms`** (package `cli`).
+- The CLI binary is named **`otf-edb`** (package `cli`).
 
-`ARCHITECTURE.md` §2 updated to reflect the `core` → `otf-dbms` rename.
+`ARCHITECTURE.md` §2 updated to reflect the `core` → `otf-edb` rename.
 
 ## D1 — Added an 11th crate, `common`, for cross-cutting foundations
 
@@ -756,7 +756,7 @@ stack (below `pager`). It contains **only**:
 
 1. `ErrorCategory` (the §9 taxonomy) and a `CategorizedError` trait
    (`fn category(&self) -> ErrorCategory`). Each crate keeps its own `thiserror`
-   enum and implements the trait; `otf-dbms` aggregates them. This preserves
+   enum and implements the trait; `otf-edb` aggregates them. This preserves
    "one error enum per crate" while sharing the taxonomy.
 2. The `Clock`, `Rng`, and `IoBackend` traits.
 3. The three `IoBackend` implementations (real-file, in-memory, fault-injecting)

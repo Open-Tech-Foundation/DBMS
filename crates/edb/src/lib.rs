@@ -1,4 +1,4 @@
-//! `otf-dbms` — the public embedded database API.
+//! `otf-edb` — the public embedded database API.
 //!
 //! Ties the engine together behind a small, hard-to-misuse surface: open or
 //! create a [`Database`], run DDL, [`execute`](Database::execute) a request,
@@ -13,7 +13,7 @@
 //! # Examples
 //!
 //! ```
-//! use otf_dbms::{ColumnDef, Database, Insert, Request, Select, Stage, TableDef, TableRef, TypeKind, Value};
+//! use otf_edb::{ColumnDef, Database, Insert, Request, Select, Stage, TableDef, TableRef, TypeKind, Value};
 //!
 //! let db = Database::create_memory().unwrap();
 //! db.create_table(TableDef::new(
@@ -52,7 +52,7 @@ use common::CategorizedError;
 pub use common::ErrorCategory;
 // The storage backend trait `Database` is generic over, plus the in-memory
 // backend, so callers can name the `Database<B>` bound and build test/embedded
-// instances through `otf_dbms` alone.
+// instances through `otf_edb` alone.
 pub use common::{IoBackend, MemoryBackend};
 
 pub use cursor::Cursor;
@@ -61,7 +61,7 @@ pub use inspect::{Inspection, IntegrityReport, TableInfo};
 pub use result::{DecodeError, Response, Row};
 
 // Re-export the schema, request, and value types so a caller can build and read
-// everything through `otf_dbms` alone. `catalog::CmpOp` (the CHECK comparison
+// everything through `otf_edb` alone. `catalog::CmpOp` (the CHECK comparison
 // operator) is aliased to `CheckCmpOp` so it does not collide with the
 // expression-grammar `proto::CmpOp` re-exported below.
 pub use catalog::{
@@ -119,7 +119,7 @@ impl Error {
     /// # Examples
     ///
     /// ```
-    /// use otf_dbms::{Error, ErrorCategory};
+    /// use otf_edb::{Error, ErrorCategory};
     ///
     /// // A type error surfaces as a `Validation` category error.
     /// let err: Error = types::TypeError::BadUuid.into();

@@ -1,9 +1,9 @@
-//! `otf-dbms` — the command-line tool.
+//! `otf-edb` — the command-line tool.
 //!
 //! ```text
-//! otf-dbms check   <file>   # run the full integrity check
-//! otf-dbms inspect <file>   # print a structural summary
-//! otf-dbms repl    <file>   # open (or create) and explore interactively
+//! otf-edb check   <file>   # run the full integrity check
+//! otf-edb inspect <file>   # print a structural summary
+//! otf-edb repl    <file>   # open (or create) and explore interactively
 //! ```
 
 mod repl;
@@ -24,7 +24,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(result: otf_dbms::Result<()>) -> ExitCode {
+fn run(result: otf_edb::Result<()>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
@@ -35,16 +35,16 @@ fn run(result: otf_dbms::Result<()>) -> ExitCode {
 }
 
 #[cfg(unix)]
-fn check(path: &str) -> otf_dbms::Result<()> {
-    let db = otf_dbms::Database::open(path)?;
+fn check(path: &str) -> otf_edb::Result<()> {
+    let db = otf_edb::Database::open(path)?;
     let report = db.check()?;
     println!("{report}");
     Ok(())
 }
 
 #[cfg(unix)]
-fn inspect(path: &str) -> otf_dbms::Result<()> {
-    let db = otf_dbms::Database::open(path)?;
+fn inspect(path: &str) -> otf_edb::Result<()> {
+    let db = otf_edb::Database::open(path)?;
     let report = db.inspect()?;
     print!("{report}");
     Ok(())
@@ -53,17 +53,17 @@ fn inspect(path: &str) -> otf_dbms::Result<()> {
 /// The interactive shell: a prompt loop over [`repl::run_line`]. Opens the
 /// database at `path`, creating it if the file is absent or empty.
 #[cfg(unix)]
-fn repl_cmd(path: &str) -> otf_dbms::Result<()> {
+fn repl_cmd(path: &str) -> otf_edb::Result<()> {
     let empty = std::fs::metadata(path)
         .map(|m| m.len() == 0)
         .unwrap_or(true);
     let db = if empty {
-        otf_dbms::Database::create(path)?
+        otf_edb::Database::create(path)?
     } else {
-        otf_dbms::Database::open(path)?
+        otf_edb::Database::open(path)?
     };
     println!(
-        "otf-dbms {} — {path}\ntype \\help for commands, \\quit to leave",
+        "otf-edb {} — {path}\ntype \\help for commands, \\quit to leave",
         env!("CARGO_PKG_VERSION"),
     );
     let stdin = std::io::stdin();
@@ -95,18 +95,18 @@ fn repl_cmd(path: &str) -> otf_dbms::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn repl_cmd(_path: &str) -> otf_dbms::Result<()> {
-    Err(otf_dbms::Error::Usage("the repl requires a unix target"))
+fn repl_cmd(_path: &str) -> otf_edb::Result<()> {
+    Err(otf_edb::Error::Usage("the repl requires a unix target"))
 }
 
 #[cfg(not(unix))]
-fn check(_path: &str) -> otf_dbms::Result<()> {
-    Err(otf_dbms::Error::Usage("file tools require a unix target"))
+fn check(_path: &str) -> otf_edb::Result<()> {
+    Err(otf_edb::Error::Usage("file tools require a unix target"))
 }
 
 #[cfg(not(unix))]
-fn inspect(_path: &str) -> otf_dbms::Result<()> {
-    Err(otf_dbms::Error::Usage("file tools require a unix target"))
+fn inspect(_path: &str) -> otf_edb::Result<()> {
+    Err(otf_edb::Error::Usage("file tools require a unix target"))
 }
 
 fn usage() {

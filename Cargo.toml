@@ -8,7 +8,7 @@ edition = "2021"
 rust-version = "1.95"
 license = "Apache-2.0"
 authors = ["Open Tech Foundation and its contributors"]
-repository = "https://github.com/opentf/DBMS"
+repository = "https://github.com/opentf/edb"
 publish = false
 
 [workspace.dependencies]
@@ -22,7 +22,7 @@ catalog = { path = "crates/catalog" }
 index = { path = "crates/index" }
 proto = { path = "crates/proto" }
 query = { path = "crates/query" }
-otf-dbms = { path = "crates/dbms" }
+otf-edb = { path = "crates/edb" }
 
 # External, vetted dependencies.
 thiserror = "2"

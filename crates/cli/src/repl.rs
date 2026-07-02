@@ -8,7 +8,7 @@
 
 use std::time::Instant;
 
-use otf_dbms::{Database, IoBackend, Request, Select, Stage, TableRef, Value};
+use otf_edb::{Database, IoBackend, Request, Select, Stage, TableRef, Value};
 
 /// What the loop should do after a line.
 pub enum Step {
@@ -162,7 +162,7 @@ fn scan_request(table: &str, limit: Option<u64>) -> Request {
 }
 
 /// Render a response as an aligned text table.
-fn render_table(out: &otf_dbms::Response) -> String {
+fn render_table(out: &otf_edb::Response) -> String {
     let cols = out.columns();
     if cols.is_empty() {
         return "(no columns)".to_string();
@@ -232,16 +232,16 @@ fn fmt_value(v: &Value) -> String {
     }
 }
 
-fn fmt_err(e: otf_dbms::Error) -> String {
+fn fmt_err(e: otf_edb::Error) -> String {
     format!("[{:?}] {e}", e.category())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use otf_dbms::{ColumnDef, Insert, TableDef, TypeKind};
+    use otf_edb::{ColumnDef, Insert, TableDef, TypeKind};
 
-    fn seeded() -> Database<otf_dbms::MemoryBackend> {
+    fn seeded() -> Database<otf_edb::MemoryBackend> {
         let db = Database::create_memory().unwrap();
         db.create_table(TableDef::new(
             "users",
@@ -265,7 +265,7 @@ mod tests {
         db
     }
 
-    fn output(db: &Database<otf_dbms::MemoryBackend>, line: &str) -> String {
+    fn output(db: &Database<otf_edb::MemoryBackend>, line: &str) -> String {
         let mut timing = false;
         match run_line(db, line, &mut timing) {
             Step::Print(text) => text,

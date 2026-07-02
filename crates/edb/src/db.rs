@@ -27,7 +27,7 @@ use crate::{Error, Result};
 /// # Examples
 ///
 /// ```
-/// use otf_dbms::{ColumnDef, Database, Insert, Request, TableDef, TypeKind, Value};
+/// use otf_edb::{ColumnDef, Database, Insert, Request, TableDef, TypeKind, Value};
 ///
 /// let db = Database::create_memory().unwrap();
 /// db.create_table(TableDef::new(
@@ -68,7 +68,7 @@ impl Database<MemoryBackend> {
     /// # Examples
     ///
     /// ```
-    /// use otf_dbms::Database;
+    /// use otf_edb::Database;
     ///
     /// let db = Database::create_memory().unwrap();
     /// assert!(db.inspect().unwrap().tables.is_empty());
@@ -154,7 +154,7 @@ impl<B: IoBackend + 'static> Database<B> {
     /// # Examples
     ///
     /// ```
-    /// use otf_dbms::{ColumnDef, Database, Insert, Request, Select, Stage, TableDef, TableRef, TypeKind, Value};
+    /// use otf_edb::{ColumnDef, Database, Insert, Request, Select, Stage, TableDef, TableRef, TypeKind, Value};
     ///
     /// let db = Database::create_memory().unwrap();
     /// db.create_table(TableDef::new(
@@ -209,7 +209,7 @@ impl<B: IoBackend + 'static> Database<B> {
     /// # Examples
     ///
     /// ```
-    /// use otf_dbms::Database;
+    /// use otf_edb::Database;
     ///
     /// let db = Database::create_memory().unwrap();
     /// let report = db.check().unwrap();

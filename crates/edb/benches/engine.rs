@@ -1,16 +1,16 @@
 //! Criterion bench suite for the engine (`PLAN.md` §3.8), driven through the
-//! public `otf_dbms` API on an in-memory backend so the numbers reflect the
+//! public `otf_edb` API on an in-memory backend so the numbers reflect the
 //! engine (CoW B+tree, MVCC commit, planner, executor) and not disk latency.
 //!
 //! Covered: point read (PK point lookup + non-PK equality), full scan, serial
 //! vs batch insert, guarded relative update, three-table INNER join + GROUP BY,
-//! and standalone GROUP BY. Run with `cargo bench -p otf-dbms --bench engine`;
+//! and standalone GROUP BY. Run with `cargo bench -p otf-edb --bench engine`;
 //! compare runs with criterion's saved baselines (`--save-baseline` /
 //! `--baseline`).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use otf_dbms::{
+use otf_edb::{
     AggFunc, ArithOp, CmpOp, ColumnDef, Database, Expr, IndexDef, Insert, MemoryBackend,
     Projection, Request, Select, Selector, Stage, TableDef, TableRef, TypeKind, Update, Value,
 };
@@ -267,13 +267,13 @@ fn inner_join_group(c: &mut Criterion) {
     // emp ⋈ dept ⋈ region, grouped by region, counting employees.
     let q = Request::Select(Select::Pipeline(vec![
         Stage::Scan(tref("emp")),
-        Stage::Join(otf_dbms::JoinSpec {
-            kind: otf_dbms::JoinKind::Inner,
+        Stage::Join(otf_edb::JoinSpec {
+            kind: otf_edb::JoinKind::Inner,
             table: tref("dept"),
             on: Some(cmp(CmpOp::Eq, qcol("emp", "dept_id"), qcol("dept", "id"))),
         }),
-        Stage::Join(otf_dbms::JoinSpec {
-            kind: otf_dbms::JoinKind::Inner,
+        Stage::Join(otf_edb::JoinSpec {
+            kind: otf_edb::JoinKind::Inner,
             table: tref("region"),
             on: Some(cmp(
                 CmpOp::Eq,

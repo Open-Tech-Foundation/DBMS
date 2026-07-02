@@ -1,6 +1,6 @@
 # RELEASE — Production readiness & ecosystem plan
 
-Status: draft roadmap for taking OTF DBMS from the completed v1 engine (Phases
+Status: draft roadmap for taking OTF EDB from the completed v1 engine (Phases
 1–10, Phase 11 in progress) to a published, production-usable release in both
 the Rust and JavaScript ecosystems.
 
@@ -34,9 +34,9 @@ full relational feature set and 20+ years of hardening today.
       it to the true minimum (broadens compatibility) and add a `cargo +<msrv>`
       CI job so it can't rot.
 - [ ] Decide the **publish surface**. crates.io requires every dependency to be
-      published, so shipping `otf-dbms` means publishing all internal crates
-      (or collapsing them). Recommendation: publish `otf-dbms` (public API) +
-      `otf-dbms-cli`; publish the rest as "internal, no semver guarantee" with a
+      published, so shipping `otf-edb` means publishing all internal crates
+      (or collapsing them). Recommendation: publish `otf-edb` (public API) +
+      `otf-edb-cli`; publish the rest as "internal, no semver guarantee" with a
       doc note. Flip `publish = true` selectively.
 - [ ] Set `version = "0.1.0"`; add `cargo-semver-checks` to CI.
 - [ ] Public-API stability pass: `#[non_exhaustive]` on public enums (`Error`,
@@ -56,7 +56,7 @@ The MessagePack wire protocol is the enabling asset: the FFI boundary is
       users need no Rust toolchain.
 - [ ] **WASM** via wasm-bindgen for browsers, Deno, Bun, edge (Workers). Memory
       first; then **OPFS**-backed persistence (async API).
-- [ ] **`@opentf/dbms` TS wrapper**: a typed AST builder emitting the same
+- [ ] **`@opentf/edb` TS wrapper**: a typed AST builder emitting the same
       `Request` shape (PLAN §8.5) + typed `Row`/`Response` accessors, `.d.ts`
       shipped. Single async surface shared by native and WASM backends.
 - [ ] CI matrix builds/tests both targets; publish on tag.
@@ -70,13 +70,13 @@ The MessagePack wire protocol is the enabling asset: the FFI boundary is
 ## Milestones
 
 - **0.1.0** — Tracks 1+2: shippable, honest embedded engine on crates.io.
-- **0.2.0** — Track 3 (Node native): `@opentf/dbms` on npm.
+- **0.2.0** — Track 3 (Node native): `@opentf/edb` on npm.
 - **0.3.0** — Track 3 (WASM/OPFS): browser + edge story.
 - Track 4 runs continuously.
 
-## OTF DBMS (v1) vs SQLite
+## OTF EDB (v1) vs SQLite
 
-| Dimension | OTF DBMS (v1) | SQLite |
+| Dimension | OTF EDB (v1) | SQLite |
 |---|---|---|
 | Category | Embedded, single-file relational | Embedded, single-file relational |
 | Implementation | Rust (no `unwrap`/`panic` in lib, enforced) | C |
@@ -99,7 +99,7 @@ The MessagePack wire protocol is the enabling asset: the FFI boundary is
 | Safety limits | Per-query caps (rows/joins/memory/deadline), bounded decode | Configurable limits API |
 | Encryption at rest | No (v1; planned) | SEE / SQLCipher |
 | Network / server | No (v1; D1-style host planned) | No (embedded only) |
-| Rust binding | Native crate (`otf-dbms`) | `rusqlite` / `sqlx` (FFI to C) |
+| Rust binding | Native crate (`otf-edb`) | `rusqlite` / `sqlx` (FFI to C) |
 | JS binding | Planned: napi native + WASM/OPFS, typed AST SDK | better-sqlite3, node:sqlite, sql.js, wa-sqlite |
 | Maturity | Pre-1.0 | 20+ years, ~trillion deployments |
 | License | Apache-2.0 | Public domain |

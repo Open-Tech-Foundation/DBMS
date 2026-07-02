@@ -41,10 +41,10 @@ impl CategorizedError for DecodeError {
 /// # Examples
 ///
 /// ```
-/// use otf_dbms::{ColumnDef, Database, Insert, Request, Select, Stage, TableRef, TypeKind, Value};
+/// use otf_edb::{ColumnDef, Database, Insert, Request, Select, Stage, TableRef, TypeKind, Value};
 ///
 /// let db = Database::create_memory().unwrap();
-/// db.create_table(otf_dbms::TableDef::new(
+/// db.create_table(otf_edb::TableDef::new(
 ///     "t",
 ///     vec![ColumnDef::new("id", TypeKind::I64), ColumnDef::new("name", TypeKind::Text)],
 ///     vec!["id"],

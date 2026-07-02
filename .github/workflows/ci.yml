@@ -58,7 +58,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: run criterion suite
-        run: cargo bench -p otf-dbms --bench engine -- --output-format bencher | tee bench-results.txt
+        run: cargo bench -p otf-edb --bench engine -- --output-format bencher | tee bench-results.txt
       - uses: actions/upload-artifact@v4
         with:
           name: bench-results

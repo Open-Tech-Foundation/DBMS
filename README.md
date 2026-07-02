@@ -1,4 +1,4 @@
-# OTF DBMS
+# OTF EDB
 
 An embedded, single-file relational database written in Rust, with a
 structured (non-SQL) binary query interface.
@@ -27,7 +27,7 @@ structured (non-SQL) binary query interface.
 ## Quick start
 
 ```rust
-use otf_dbms::{
+use otf_edb::{
     ColumnDef, Database, Insert, Request, Select, Stage, TableDef, TableRef, TypeKind, Value,
 };
 
@@ -58,7 +58,7 @@ let out = db.execute(&Request::Select(Select::Pipeline(vec![Stage::Scan(
     TableRef { table: "users".into(), alias: None },
 )])))?;
 assert_eq!(out.row(0).unwrap().get_text("name")?, Some("Ada"));
-# Ok::<(), otf_dbms::Error>(())
+# Ok::<(), otf_edb::Error>(())
 ```
 
 Requests are built as typed ASTs (as above) or sent as MessagePack bytes via
@@ -68,9 +68,9 @@ concurrent writer, open a snapshot-owning cursor with `Database::open_cursor`.
 ## Command-line tool
 
 ```text
-otf-dbms check   <file>   # full integrity check (pager + trees + indexes)
-otf-dbms inspect <file>   # structural summary (storage + per-table counts)
-otf-dbms repl    <file>   # open (or create) and explore interactively
+otf-edb check   <file>   # full integrity check (pager + trees + indexes)
+otf-edb inspect <file>   # structural summary (storage + per-table counts)
+otf-edb repl    <file>   # open (or create) and explore interactively
 ```
 
 The REPL is an inspection console — `\tables`, `\schema <t>`, `\count <t>`,
@@ -88,6 +88,6 @@ The REPL is an inspection console — `\tables`, `\schema <t>`, `\count <t>`,
 Licensed under the [Apache License, Version 2.0](LICENSE). See the [NOTICE](NOTICE) file for attribution.
 
 ```text
-OTF DBMS
+OTF EDB
 Copyright 2026 Open Tech Foundation and its contributors
 ```

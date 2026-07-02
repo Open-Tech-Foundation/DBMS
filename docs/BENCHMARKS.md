@@ -1,7 +1,7 @@
 # Benchmarks
 
 The criterion bench suite (`PLAN.md` §3.8) lives in
-`crates/dbms/benches/engine.rs` and runs through the public `otf_dbms` API on an
+`crates/edb/benches/engine.rs` and runs through the public `otf_edb` API on an
 **in-memory** backend, so the numbers reflect the engine — CoW B+tree, MVCC
 commit, planner, executor — not disk latency.
 
@@ -9,11 +9,11 @@ commit, planner, executor — not disk latency.
 
 ```sh
 # Full suite.
-cargo bench -p otf-dbms --bench engine
+cargo bench -p otf-edb --bench engine
 
 # Save a named baseline, then compare a later run against it.
-cargo bench -p otf-dbms --bench engine -- --save-baseline main
-cargo bench -p otf-dbms --bench engine -- --baseline main
+cargo bench -p otf-edb --bench engine -- --save-baseline main
+cargo bench -p otf-edb --bench engine -- --baseline main
 ```
 
 CI compiles the benches on every push (via `build --all-targets`) but only

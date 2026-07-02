@@ -7,8 +7,8 @@
 use crate::page::{self, Frame, HEADER_SIZE};
 use crate::{corrupt, CorruptionKind, PageId, PagerError, Result};
 
-/// File-format magic: identifies an OTF DBMS file and its format generation.
-pub(crate) const MAGIC: [u8; 8] = *b"OTFDBMS\x01";
+/// File-format magic: identifies an OTF EDB file and its format generation.
+pub(crate) const MAGIC: [u8; 8] = *b"OTF-EDB\x01";
 
 /// The format version this build reads and writes.
 pub(crate) const FORMAT_VERSION: u32 = 1;

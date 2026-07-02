@@ -4,7 +4,7 @@
 //! its integrity intact.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use otf_dbms::{
+use otf_edb::{
     CheckCmpOp, CheckExpr, ColumnDef, Database, Delete, ErrorCategory, Expr, IndexDef, Insert,
     Request, Selector, TableDef, TypeKind, Value,
 };
@@ -16,10 +16,10 @@ fn row(cols: &[(&str, Value)]) -> Vec<(String, Value)> {
 }
 
 fn insert(
-    db: &Database<impl otf_dbms::IoBackend + 'static>,
+    db: &Database<impl otf_edb::IoBackend + 'static>,
     table: &str,
     cols: &[(&str, Value)],
-) -> otf_dbms::Result<()> {
+) -> otf_edb::Result<()> {
     db.execute(&Request::Insert(Insert {
         table: table.into(),
         rows: vec![row(cols)],
@@ -29,7 +29,7 @@ fn insert(
 
 /// A table exercising every constraint: PK, a UNIQUE column, a NOT NULL column,
 /// and a CHECK.
-fn constrained_db() -> Database<otf_dbms::MemoryBackend> {
+fn constrained_db() -> Database<otf_edb::MemoryBackend> {
     let db = Database::create_memory().unwrap();
     db.create_table(
         TableDef::new(
@@ -265,8 +265,8 @@ fn a_failing_transaction_leaves_no_partial_state() {
 
     // Only the original row survives — ids 2 and 3 were rolled back.
     let scan = db
-        .execute(&Request::Select(otf_dbms::Select::Pipeline(vec![
-            otf_dbms::Stage::Scan(otf_dbms::TableRef {
+        .execute(&Request::Select(otf_edb::Select::Pipeline(vec![
+            otf_edb::Stage::Scan(otf_edb::TableRef {
                 table: "acct".into(),
                 alias: None,
             }),
@@ -287,7 +287,7 @@ fn a_failing_transaction_leaves_no_partial_state() {
 #[test]
 fn a_file_round_trips_through_reopen_with_integrity() {
     let path = std::env::temp_dir().join(format!(
-        "otf-dbms-roundtrip-{}-{}.db",
+        "otf-edb-roundtrip-{}-{}.db",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -315,7 +315,7 @@ fn a_file_round_trips_through_reopen_with_integrity() {
         db.execute(&Request::Delete(Delete {
             table: "kv".into(),
             selector: Some(Selector::Where(Expr::Cmp {
-                op: otf_dbms::CmpOp::Lt,
+                op: otf_edb::CmpOp::Lt,
                 lhs: Box::new(Expr::Column {
                     table: None,
                     column: "k".into(),
@@ -333,8 +333,8 @@ fn a_file_round_trips_through_reopen_with_integrity() {
     let report = db.check().unwrap();
     assert_eq!(report.tables_checked, 1);
     let count = db
-        .execute(&Request::Select(otf_dbms::Select::Pipeline(vec![
-            otf_dbms::Stage::Scan(otf_dbms::TableRef {
+        .execute(&Request::Select(otf_edb::Select::Pipeline(vec![
+            otf_edb::Stage::Scan(otf_edb::TableRef {
                 table: "kv".into(),
                 alias: None,
             }),

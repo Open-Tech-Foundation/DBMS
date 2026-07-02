@@ -36,7 +36,7 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
   so the stored format still evolves in place behind its single version byte (no
   legacy-decode paths); a record is either the current version or rejected as
   corrupt.
-- `otf-dbms`: re-export `ForeignKey` and `RefAction`.
+- `otf-edb`: re-export `ForeignKey` and `RefAction`.
 
 ### Phase 11 — Playgrounds, hardening & benchmarking
 
@@ -51,18 +51,18 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
     matching primary keys and fetching those base rows — ~34 ms → ~135 µs (~25×
     at 10k rows). Results and order are identical to the scan (equivalence tests
     cover it). Range predicates still scan — a further access-path step.
-- **Criterion bench suite** (`crates/dbms/benches/engine.rs`, `PLAN.md` §3.8):
+- **Criterion bench suite** (`crates/edb/benches/engine.rs`, `PLAN.md` §3.8):
   point read (PK equality + secondary seek), full scan, serial vs batch insert,
   guarded update, INNER join + GROUP BY, and standalone GROUP BY — all through
   the public API. A committed baseline and methodology live in
   `docs/BENCHMARKS.md`; CI compiles the benches on every push and runs them on
   demand via a `workflow_dispatch` job.
 - Acceptance scenarios (`PLAN.md` §7) driven end-to-end through the public
-  `otf_dbms` API: indexed lookup verified via EXPLAIN (2), a three-table INNER
+  `otf_edb` API: indexed lookup verified via EXPLAIN (2), a three-table INNER
   join + GROUP BY matching across both the pipeline and clause surfaces (3), the
   bank scenario under concurrency (5), optimistic version-guard first-committer-
   wins (6), and guard-rule enforcement (7). (1 and 4 already covered in `api.rs`.)
-- `otf-dbms`: re-export `CheckExpr` (and `catalog::CmpOp` as `CheckCmpOp`) so
+- `otf-edb`: re-export `CheckExpr` (and `catalog::CmpOp` as `CheckCmpOp`) so
   `CHECK` constraints are declarable through the public API alone; `Response`
   now derives `Debug`.
 - `query`: **per-query resource caps** (`ResourceLimits`) enforced by the
@@ -101,14 +101,14 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 - `txn`: `WriterStopped` now carries the **category** of the fatal error that
   stopped the writer, so a client sees `Corruption` vs. `Io` faithfully instead
   of everything collapsing to `Io`.
-- `otf-dbms`: `Database::inspect` counts rows with an O(1)-memory cursor
+- `otf-edb`: `Database::inspect` counts rows with an O(1)-memory cursor
   (`CatSnapshot::row_count` → `Snapshot::count_in` → `Cursor::count`) instead of
   materializing every row of every table.
 
 ### Phase 10 — Public API & tools
 
 #### Added
-- `otf-dbms`: the **public embedded API** — `Database` wraps the engine behind
+- `otf-edb`: the **public embedded API** — `Database` wraps the engine behind
   a small, hard-to-misuse surface (`ARCHITECTURE.md` §4):
   - **Open/create** — `create`/`open` (file-backed, unix), `create_memory`
     (in-RAM), and `create_with`/`open_with` (injected `Clock`/`Rng` for
@@ -129,14 +129,14 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
     `inspect` (structural summary: storage stats + per-table row/index counts).
   - `Error` gains `Io`, `Decode`, and `Usage` variants, each mapped to its
     `SPEC.md` §9 category.
-- `cli`: `otf-dbms check|inspect <file>` — read-only file tools over the API.
+- `cli`: `otf-edb check|inspect <file>` — read-only file tools over the API.
 - Tests: doc-examples on every significant public item (compile + run); an
   open→write→reopen→read file round-trip (scenario 1); an integrity check that
   flags an intentionally corrupted file; and a snapshot-owning cursor paging a
   stable view while a concurrent writer inserts/updates/deletes (scenario 4).
 
 #### Changed
-- `dbms` crate: promoted from the Phase 1 error-aggregation scaffold to the
+- `edb` crate: promoted from the Phase 1 error-aggregation scaffold to the
   full public API; `cli` from a placeholder to the file-tools binary.
 
 ### Phase 9 — Validator, planner, executor & write path
@@ -483,11 +483,11 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 #### Added
 - Cargo workspace with the crate skeletons from `ARCHITECTURE.md` §2: `pager`,
   `btree`, `txn`, `types`, `catalog`, `index`, `proto`, `query`, plus the public
-  `otf-dbms` crate and the `cli` binary crate.
+  `otf-edb` crate and the `cli` binary crate.
 - `common` crate (cross-cutting foundations): the `SPEC.md` §9 `ErrorCategory`
   taxonomy and the `CategorizedError` trait (see `DECISIONS.md` D1).
 - Per-crate `thiserror` error enums, each implementing `CategorizedError`;
-  `otf-dbms::Error` aggregates them and reports the §9 category, verified by a
+  `otf-edb::Error` aggregates them and reports the §9 category, verified by a
   nested-propagation test.
 - Injectable host services in `common`: `Clock` (`SystemClock`, `ManualClock`),
   `Rng` (`SeededRng`, SplitMix64), and the `IoBackend` trait with three backends
@@ -500,7 +500,7 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 
 #### Changed
 - `ARCHITECTURE.md` §1/§2: added `common` as the 11th crate and renamed the
-  public `core` crate to `otf-dbms` (see `DECISIONS.md` D1, D2).
+  public `core` crate to `otf-edb` (see `DECISIONS.md` D1, D2).
 
 #### Security
 - Operating rule 3 enforced mechanically: `clippy::{unwrap_used, expect_used,

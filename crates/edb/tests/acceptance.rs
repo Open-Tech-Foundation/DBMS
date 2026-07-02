@@ -1,5 +1,5 @@
 //! Phase 11 acceptance scenarios (`PLAN.md` §7), driven **end-to-end through
-//! the public `otf_dbms` API** — the surface a real integrator uses.
+//! the public `otf_edb` API** — the surface a real integrator uses.
 //!
 //! Scenarios 1 (CRUD + reopen) and 4 (keyset pagination stability) live in
 //! `api.rs`; this file covers the rest that the API can express directly:
@@ -24,7 +24,7 @@ use std::thread;
 use common::{
     Clock, FaultInjectingBackend, FaultPoint, MemoryBackend, Rng, SeededRng, SystemClock,
 };
-use otf_dbms::{
+use otf_edb::{
     AggFunc, ArithOp, CheckCmpOp, CheckExpr, ClauseSelect, CmpOp, ColumnDef, Database, Dir,
     ErrorCategory, Expr, IndexDef, Insert, JoinKind, JoinSpec, Projection, Request, Select,
     Selector, SortKey, Stage, TableDef, TableRef, TypeKind, Update, Value,
@@ -464,7 +464,7 @@ fn a_selectorless_update_or_delete_is_rejected() {
 
     // …and delete.
     let delete = db
-        .execute(&Request::Delete(otf_dbms::Delete {
+        .execute(&Request::Delete(otf_edb::Delete {
             table: "accounts".into(),
             selector: None,
         }))

@@ -27,18 +27,18 @@ use crate::{Error, Result};
 /// # Examples
 ///
 /// ```
-/// use otf_dbms::{ColumnDef, Database, Select, SortKey, Stage, TableRef, TypeKind, Value};
-/// use otf_dbms::{Dir, Expr, Request};
+/// use otf_edb::{ColumnDef, Database, Select, SortKey, Stage, TableRef, TypeKind, Value};
+/// use otf_edb::{Dir, Expr, Request};
 ///
 /// let db = Database::create_memory().unwrap();
-/// db.create_table(otf_dbms::TableDef::new(
+/// db.create_table(otf_edb::TableDef::new(
 ///     "n",
 ///     vec![ColumnDef::new("id", TypeKind::I64)],
 ///     vec!["id"],
 /// ))
 /// .unwrap();
 /// for id in 1..=7 {
-///     db.execute(&Request::Insert(otf_dbms::Insert {
+///     db.execute(&Request::Insert(otf_edb::Insert {
 ///         table: "n".into(),
 ///         rows: vec![vec![("id".into(), Value::I64(id))]],
 ///     }))

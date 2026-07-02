@@ -1,5 +1,5 @@
 [package]
-name = "otf-dbms"
+name = "otf-edb"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,10 +7,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "OTF DBMS — the public embedded database API; aggregates the engine error taxonomy (Phase 10)."
+description = "OTF EDB — the public embedded database API; aggregates the engine error taxonomy (Phase 10)."
 
 [lib]
-name = "otf_dbms"
+name = "otf_edb"
 
 [dependencies]
 common.workspace = true

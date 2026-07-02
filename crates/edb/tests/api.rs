@@ -9,14 +9,14 @@
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use otf_dbms::{
+use otf_edb::{
     ColumnDef, Database, Delete, Dir, ErrorCategory, Expr, Insert, Request, Select, Selector,
     SortKey, Stage, TableDef, TableRef, TypeKind, Update, Value,
 };
 
 fn temp_path(tag: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
-        "otf-dbms-{}-{}-{}.db",
+        "otf-edb-{}-{}-{}.db",
         tag,
         std::process::id(),
         std::time::SystemTime::now()
@@ -75,7 +75,7 @@ fn crud_survives_reopen() {
         db.execute(&Request::Update(Update {
             table: "users".into(),
             selector: Some(Selector::Where(Expr::Cmp {
-                op: otf_dbms::CmpOp::Eq,
+                op: otf_edb::CmpOp::Eq,
                 lhs: Box::new(Expr::Column {
                     table: None,
                     column: "id".into(),
@@ -89,7 +89,7 @@ fn crud_survives_reopen() {
         db.execute(&Request::Delete(Delete {
             table: "users".into(),
             selector: Some(Selector::Where(Expr::Cmp {
-                op: otf_dbms::CmpOp::Eq,
+                op: otf_edb::CmpOp::Eq,
                 lhs: Box::new(Expr::Column {
                     table: None,
                     column: "id".into(),
@@ -269,7 +269,7 @@ fn cursor_pages_a_stable_snapshot_under_a_concurrent_writer() {
 
 fn eq_id(id: i64) -> Expr {
     Expr::Cmp {
-        op: otf_dbms::CmpOp::Eq,
+        op: otf_edb::CmpOp::Eq,
         lhs: Box::new(Expr::Column {
             table: None,
             column: "id".into(),
