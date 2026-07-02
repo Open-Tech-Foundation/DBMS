@@ -29,6 +29,9 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
     mutation. `drop table` of a referenced table is blocked (`TableReferenced`).
   - `on_update` `CASCADE` may not move a child's own primary-key column (v1
     keeps primary keys immutable); that combination is rejected at DDL (D32).
+  - Finding the referencing children uses an **index range probe** when the child
+    has an index whose leading columns are the referencing columns (O(log n)),
+    and falls back to a full child scan otherwise.
 - Catalog record format gained a foreign-key section. The engine is pre-release,
   so the stored format still evolves in place behind its single version byte (no
   legacy-decode paths); a record is either the current version or rejected as

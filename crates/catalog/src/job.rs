@@ -1132,9 +1132,37 @@ fn scan_children<B: IoBackend>(
     fk: &ForeignKey,
     key_vals: &[Value],
 ) -> txn::Result<Vec<(Vec<u8>, Vec<Value>)>> {
-    let root = load_root(ctx, &child.name)?;
+    let data_root = load_root(ctx, &child.name)?;
     let mut out = Vec::new();
-    for (cpk, bytes) in ctx.scan(root, None, None)? {
+
+    // Fast path: an index whose leading columns are exactly the referencing
+    // columns turns the O(rows) scan into an O(log n) range probe. Unique and
+    // non-unique indexes both qualify, as does a composite index that merely
+    // starts with the referencing columns (they form a key prefix).
+    let fk_index = child.indexes.iter().find(|i| {
+        i.columns.len() >= fk.columns.len() && i.columns[..fk.columns.len()] == fk.columns[..]
+    });
+    if let Some(idx) = fk_index {
+        let iroot = load_iroot(ctx, &child.name, &idx.name)?;
+        let (lo, hi) = index::prefix_bounds(key_vals).map_err(idx_err)?;
+        for (_entry_key, pk_key) in ctx.scan(iroot, Some(&lo), hi.as_deref())? {
+            // The index entry's value is the base row's primary key.
+            let Some(bytes) = ctx.lookup(data_root, &pk_key)? else {
+                continue; // index and base are kept in sync; stay defensive
+            };
+            let crow = decode_padded(child, &bytes).map_err(rej)?;
+            // The probe is authoritative; this guard just makes the fast path
+            // behaviour-identical to the scan (and skips any NULL-keyed rows a
+            // non-unique index would still list under a different prefix).
+            if fk_values(child, fk, &crow).as_deref() == Some(key_vals) {
+                out.push((pk_key, crow));
+            }
+        }
+        return Ok(out);
+    }
+
+    // Fallback: a full child scan when no usable index exists.
+    for (cpk, bytes) in ctx.scan(data_root, None, None)? {
         let crow = decode_padded(child, &bytes).map_err(rej)?;
         if fk_values(child, fk, &crow).as_deref() == Some(key_vals) {
             out.push((cpk, crow));

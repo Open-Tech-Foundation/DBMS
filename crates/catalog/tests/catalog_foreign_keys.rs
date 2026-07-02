@@ -668,6 +668,85 @@ fn composite_foreign_key_is_enforced() {
 }
 
 #[test]
+fn cascade_uses_a_composite_prefix_index() {
+    // The child indexes (country, region, name); the foreign key is on
+    // (country, region) — a prefix of that index — so scan_children takes the
+    // O(log n) range-probe path. This checks it resolves the right children.
+    let (cat, _b) = new_catalog();
+    cat.create_table(TableDef::new(
+        "regions",
+        vec![
+            ColumnDef::new("country", TypeKind::Text),
+            ColumnDef::new("code", TypeKind::I64),
+        ],
+        vec!["country", "code"],
+    ))
+    .unwrap();
+    cat.create_table(
+        TableDef::new(
+            "cities",
+            vec![
+                ColumnDef::new("id", TypeKind::I64),
+                ColumnDef::new("country", TypeKind::Text),
+                ColumnDef::new("region", TypeKind::I64),
+                ColumnDef::new("name", TypeKind::Text),
+            ],
+            vec!["id"],
+        )
+        .index(IndexDef::new(
+            "by_region",
+            vec!["country", "region", "name"],
+        ))
+        .foreign_key(
+            ForeignKey::new(
+                "fk_region",
+                vec!["country", "region"],
+                "regions",
+                vec!["country", "code"],
+            )
+            .on_delete(RefAction::Cascade),
+        ),
+    )
+    .unwrap();
+
+    for code in [5, 6] {
+        cat.insert(
+            "regions",
+            row(&[
+                ("country", Value::Text("US".into())),
+                ("code", Value::I64(code)),
+            ]),
+        )
+        .unwrap();
+    }
+    // Two cities in region 5, one in region 6.
+    for (id, region, name) in [(1, 5, "A"), (2, 5, "B"), (3, 6, "C")] {
+        cat.insert(
+            "cities",
+            row(&[
+                ("id", Value::I64(id)),
+                ("country", Value::Text("US".into())),
+                ("region", Value::I64(region)),
+                ("name", Value::Text(name.into())),
+            ]),
+        )
+        .unwrap();
+    }
+
+    // Deleting region 5 cascades only its two cities; region 6's city survives.
+    cat.delete("regions", vec![Value::Text("US".into()), Value::I64(5)])
+        .unwrap();
+    let snap = cat.snapshot();
+    assert_eq!(
+        snap.row_count("cities").unwrap(),
+        1,
+        "only the region-6 city remains"
+    );
+    assert!(snap.get("cities", &[Value::I64(3)]).unwrap().is_some());
+    snap.validate().unwrap();
+}
+
+#[test]
 fn changing_a_referenced_unique_key_is_restricted() {
     let (cat, _b) = new_catalog();
     // Parent keyed by id, but referenced through a UNIQUE `slug`.

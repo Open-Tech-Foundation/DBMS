@@ -46,11 +46,14 @@ would break the no-op guarantee when a downstream RESTRICT or a rewrite-violates
 CHECK/UNIQUE is hit mid-closure; (b) requiring no DDL constraint on the parent
 columns, which would make every child existence probe O(n) instead of O(log n).
 
-**Known v1 limitation:** the referenced side finds child rows by scanning the
-child table; an index on the referencing columns (to make it O(log n)) is a
-tracked optimization, not yet built. (The engine is pre-release, so the catalog
-record format still evolves in place behind its single version byte — no
-legacy-decode paths.)
+**Referenced-side lookup** (`scan_children`) uses an **index range probe** when
+the child has an index whose leading columns are the referencing columns (unique,
+non-unique, or a composite index the FK columns prefix) — O(log n) instead of a
+full child scan — and falls back to a scan when no such index exists. So a
+performance-sensitive `on_delete`/`on_update` FK is served by simply indexing the
+referencing columns; auto-creating that index is a possible future convenience.
+(The engine is pre-release, so the catalog record format still evolves in place
+behind its single version byte — no legacy-decode paths.)
 
 ---
 
