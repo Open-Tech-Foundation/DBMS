@@ -5,6 +5,42 @@ Per `PLAN.md` §1 rule 6, every resolution of an ambiguity or deviation from
 
 ---
 
+## D31 — The free-list is rebuilt into fresh pages each commit (crash-safe), not mutated in place
+
+**Phase:** 11 · **Status:** accepted
+
+Acceptance scenario 8 (crash durability) exposed a real bug: the CoW + meta-swap
+design guarantees every page reachable from the *last committed* meta stays
+byte-for-byte intact until the *new* meta is durable — which holds for data
+pages (new pages go to free slots; old pages are never touched) but **not for
+the free-list**. The allocator mutated trunk pages in place and could repurpose
+an emptied trunk as a data page, flushing those writes in commit step 2 (data
+pages), before the meta swap in step 3. A crash in between recovers the old
+meta, whose free-list chain now points at overwritten pages → a corrupt
+free-list, and a next allocation that could hand out a live page. (Reads were
+always safe — the data tree is intact — but `validate` and the next write were
+not.)
+
+**Decision:** the authoritative free set lives **in memory** (`State.free_set`);
+`alloc`/`free` only touch it. At each `commit` the set is **serialized into a
+fresh trunk chain** whose container pages are drawn from the free set itself —
+free-page content the committed meta never reads, so overwriting it is
+crash-safe — while the previous commit's trunk pages are left untouched on disk
+and recycled into the free set only *after* the new meta is durable. The whole
+committed state (data + free-list) is therefore CoW, and recovery to either meta
+is consistent. The set is loaded from the durable chain lazily on the first
+write, so a read-only open still touches only the meta and a database with a
+corrupt free-list stays readable ([[D8]] durability, [[D28]] rejection reclaim).
+
+**Tradeoffs:** (1) a commit rewrites all trunk pages, so a workload with a very
+large stable free set pays O(free/`CAPACITY`) trunk writes per commit — a future
+incremental-CoW free-list could avoid this (measure first, PLAN §2). (2) A few
+freed pages are briefly parked as trunk structure and recycled one commit later,
+so a huge free-then-realloc burst without an intervening commit can grow the
+file by that bounded trunk overhead; it converges and never leaks.
+
+---
+
 ## D30 — Per-query resource caps are enforced at the streaming executor's materialization points
 
 **Phase:** 11 · **Status:** accepted

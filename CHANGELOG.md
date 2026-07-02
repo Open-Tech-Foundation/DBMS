@@ -35,6 +35,14 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
   in v1; a per-transaction dirty-page cap is the tracked mitigation (D29).
 
 #### Fixed
+- `pager`: the **free-list is now crash-safe**. It was mutated in place and
+  flushed before the meta swap, so a crash between a commit's data sync and its
+  meta swap left the recovered meta pointing at trunk pages the interrupted
+  commit had repurposed — a corrupt free-list on reopen (surfaced by acceptance
+  scenario 8). The free set now lives in memory and is serialized into a fresh
+  trunk chain at each commit, drawing container pages only from free-page slots
+  and recycling old trunks a commit later, so recovery to either meta is
+  consistent; loaded lazily so a corrupt free-list still permits reads (D31).
 - `txn`: a **rejected transaction now reclaims the pages it allocated**. A
   multi-op batch that mutates and then fails (violating validate-then-apply)
   used to leak its copy-on-write pages — unpublished but never freed, growing

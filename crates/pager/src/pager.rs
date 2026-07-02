@@ -24,6 +24,21 @@ struct State {
     /// out here. The writer uses this to reclaim the pages a rejected
     /// transaction allocated (they are unpublished, so freeing them is safe).
     alloc_log: Option<Vec<PageId>>,
+    /// The **authoritative** set of free (allocatable) page ids, held in
+    /// memory. `alloc`/`free` mutate only this; the durable trunk chain is a
+    /// serialization of it, rebuilt into crash-safe pages at each `commit`
+    /// (never mutated in place — that would corrupt the last committed meta's
+    /// free-list on a crash between the data sync and the meta swap).
+    free_set: Vec<u64>,
+    /// The pages currently serving as the durable trunk chain (structural, not
+    /// allocatable). They become free one commit after they go unreferenced.
+    trunks: Vec<u64>,
+    /// Whether `free_set`/`trunks` have been loaded from the durable trunk
+    /// chain. Loading is deferred to the first write (`alloc`/`free`/`commit`)
+    /// so a read-only open touches only the meta — and a database whose
+    /// free-list is corrupt stays fully *readable* (the corruption blocks
+    /// writes, and surfaces in `validate`, but never a plain read).
+    free_loaded: bool,
 }
 
 /// Paged access to a single backing store.
@@ -65,6 +80,10 @@ impl<B: IoBackend> Pager<B> {
                 meta,
                 active_slot: 0,
                 alloc_log: None,
+                free_set: Vec::new(),
+                trunks: Vec::new(),
+                // A fresh database starts with an empty, already-loaded free set.
+                free_loaded: true,
             }),
             txn_id,
         })
@@ -105,9 +124,55 @@ impl<B: IoBackend> Pager<B> {
                 meta,
                 active_slot,
                 alloc_log: None,
+                // Deferred until the first write recovers it from the trunk chain.
+                free_set: Vec::new(),
+                trunks: Vec::new(),
+                free_loaded: false,
             }),
             txn_id,
         })
+    }
+
+    /// Walk the committed free-list trunk chain, returning the free (allocatable)
+    /// page ids it stores and the trunk page ids themselves.
+    fn load_free_list(backend: &B, meta: &Meta) -> Result<(Vec<u64>, Vec<u64>)> {
+        let mut free = Vec::new();
+        let mut trunks = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut head = meta.freelist_head;
+        while let Some(trunk_id) = head {
+            if trunk_id.get() < FIRST_DATA_PAGE || trunk_id.get() >= meta.page_count {
+                return Err(corrupt(CorruptionKind::FreelistOutOfRange {
+                    id: trunk_id.get(),
+                }));
+            }
+            if !seen.insert(trunk_id.get()) {
+                return Err(corrupt(CorruptionKind::FreelistCycle {
+                    id: trunk_id.get(),
+                }));
+            }
+            let mut frame = page::zeroed();
+            backend.read_at(trunk_id.get() * PAGE_SIZE as u64, &mut frame[..])?;
+            page::verify(&frame[..], trunk_id)?;
+            if page::page_type(&frame)? != PageType::Freelist {
+                return Err(corrupt(CorruptionKind::FreelistBadType {
+                    id: trunk_id.get(),
+                }));
+            }
+            let count = freelist::count(&frame);
+            if count > freelist::CAPACITY {
+                return Err(corrupt(CorruptionKind::FreelistBadCount {
+                    id: trunk_id.get(),
+                }));
+            }
+            trunks.push(trunk_id.get());
+            for i in 0..count {
+                free.push(freelist::id_at(&frame, i));
+            }
+            let next = freelist::next(&frame);
+            head = (next != 0).then(|| PageId::new(next));
+        }
+        Ok((free, trunks))
     }
 
     /// The transaction id of the last successful commit.
@@ -144,11 +209,19 @@ impl<B: IoBackend> Pager<B> {
         Ok(())
     }
 
-    /// Allocate a page id, reusing a freed page when one is available, else
+    /// Allocate a page id, reusing a free page when one is available, else
     /// extending the file's high-water mark.
     pub fn alloc(&self) -> Result<PageId> {
         let mut st = self.locked();
-        let id = self.alloc_locked(&mut st)?;
+        self.ensure_free_loaded(&mut st)?;
+        let id = match st.free_set.pop() {
+            Some(id) => PageId::new(id),
+            None => {
+                let id = PageId::new(st.meta.page_count);
+                st.meta.page_count += 1;
+                id
+            }
+        };
         if let Some(log) = &mut st.alloc_log {
             log.push(id);
         }
@@ -168,32 +241,24 @@ impl<B: IoBackend> Pager<B> {
         self.locked().alloc_log.take().unwrap_or_default()
     }
 
-    /// Return a page to the free list for later reuse.
+    /// Return a page to the free set for later reuse. In-memory only; the change
+    /// is serialized to the durable trunk chain at the next [`commit`](Self::commit).
     pub fn free(&self, id: PageId) -> Result<()> {
         let mut st = self.locked();
         self.in_range(&st, id)?;
-        match st.meta.freelist_head {
-            Some(head) => {
-                let trunk = self.fetch(&mut st, head)?;
-                let count = freelist::count(&trunk);
-                if count < freelist::CAPACITY {
-                    let mut next = *trunk;
-                    freelist::set_id_at(&mut next, count, id.get());
-                    freelist::set_count(&mut next, count + 1);
-                    page::finalize(&mut next, PageType::Freelist, head);
-                    st.cache.insert(head.get(), Arc::from(Box::new(next)), true);
-                    st.meta.freelist_len += 1;
-                } else {
-                    // Head trunk is full: the freed page becomes a new head
-                    // trunk chained to the old head.
-                    self.init_trunk(&mut st, id, head.get());
-                    st.meta.freelist_head = Some(id);
-                }
-            }
-            None => {
-                self.init_trunk(&mut st, id, 0);
-                st.meta.freelist_head = Some(id);
-            }
+        self.ensure_free_loaded(&mut st)?;
+        st.free_set.push(id.get());
+        Ok(())
+    }
+
+    /// Recover the free set from the durable trunk chain on first write. A
+    /// corrupt trunk surfaces here (blocking the write) rather than at open.
+    fn ensure_free_loaded(&self, st: &mut State) -> Result<()> {
+        if !st.free_loaded {
+            let (free_set, trunks) = Self::load_free_list(&self.backend, &st.meta)?;
+            st.free_set = free_set;
+            st.trunks = trunks;
+            st.free_loaded = true;
         }
         Ok(())
     }
@@ -206,15 +271,18 @@ impl<B: IoBackend> Pager<B> {
     /// blocked during the durability window. This assumes a single writer (the
     /// `txn` layer serializes commits); concurrent commits are not supported.
     pub fn commit(&self) -> Result<()> {
-        // 1. Under the lock, snapshot what to flush and the meta to install.
-        let (dirty, meta, inactive, needed) = {
-            let st = self.locked();
+        // 1. Under the lock, serialize the free set into a fresh (crash-safe)
+        //    trunk chain, then snapshot what to flush and the meta to install.
+        let (dirty, meta, inactive, needed, dead_trunks) = {
+            let mut st = self.locked();
+            self.ensure_free_loaded(&mut st)?;
+            let dead_trunks = Self::rebuild_free_list(&mut st);
             let needed = st.meta.page_count * PAGE_SIZE as u64;
             let dirty = st.cache.dirty_pages();
             let inactive = 1 - st.active_slot;
             let mut meta = st.meta.clone();
             meta.txn_id += 1;
-            (dirty, meta, inactive, needed)
+            (dirty, meta, inactive, needed, dead_trunks)
         };
 
         // 2. Durable I/O with the lock released. Data pages → fsync → new meta
@@ -234,15 +302,56 @@ impl<B: IoBackend> Pager<B> {
             .write_at(inactive * PAGE_SIZE as u64, &frame[..])?;
         self.backend.sync()?;
 
-        // 3. Promote under the lock: only now is the commit visible.
+        // 3. Promote under the lock: only now is the commit visible. The
+        //    previous trunk pages are now unreferenced by the durable meta, so
+        //    they can rejoin the free set (they were kept out until this point
+        //    so the pre-commit meta's free-list stayed intact for recovery).
         {
             let mut st = self.locked();
             st.cache.clear_dirty();
             st.meta = meta;
             st.active_slot = inactive;
+            st.free_set.extend(dead_trunks);
             self.txn_id.store(st.meta.txn_id, Ordering::Release);
         }
         Ok(())
+    }
+
+    /// Serialize the in-memory free set into a fresh trunk chain, staged dirty
+    /// in the cache, and point the (in-memory) meta at it. Container pages are
+    /// drawn from the free set itself — their current content is free-page data
+    /// the committed meta never reads, so overwriting them is crash-safe, and
+    /// the previous trunk pages are left untouched on disk (so the last
+    /// committed free-list survives a crash before the meta swap). Returns those
+    /// now-superseded trunk pages for the caller to recycle after the swap.
+    fn rebuild_free_list(st: &mut State) -> Vec<u64> {
+        let dead_trunks = std::mem::take(&mut st.trunks);
+        let mut pool = std::mem::take(&mut st.free_set);
+        let mut new_trunks = Vec::new();
+        let mut stored: Vec<u64> = Vec::new();
+        let mut head: u64 = 0;
+        // Each trunk container holds up to CAPACITY of the remaining free ids;
+        // the container page itself is spent as structure, not stored as free.
+        while let Some(container) = pool.pop() {
+            let take = pool.len().min(freelist::CAPACITY as usize);
+            let ids: Vec<u64> = pool.split_off(pool.len() - take);
+            let mut frame = page::zeroed();
+            freelist::set_next(&mut frame, head);
+            freelist::set_count(&mut frame, take as u32);
+            for (i, &id) in ids.iter().enumerate() {
+                freelist::set_id_at(&mut frame, i as u32, id);
+            }
+            page::finalize(&mut frame, PageType::Freelist, PageId::new(container));
+            st.cache.insert(container, Arc::from(frame), true);
+            stored.extend(ids);
+            head = container;
+            new_trunks.push(container);
+        }
+        st.meta.freelist_head = (head != 0).then(|| PageId::new(head));
+        st.meta.freelist_len = stored.len() as u64;
+        st.free_set = stored;
+        st.trunks = new_trunks;
+        dead_trunks
     }
 
     /// Walk the committed structures and prove their consistency (meta slots,
@@ -355,46 +464,6 @@ impl<B: IoBackend> Pager<B> {
         let arc: Arc<Frame> = Arc::from(frame);
         st.cache.insert(id.get(), Arc::clone(&arc), false);
         Ok(arc)
-    }
-
-    fn alloc_locked(&self, st: &mut State) -> Result<PageId> {
-        match st.meta.freelist_head {
-            None => {
-                let id = PageId::new(st.meta.page_count);
-                st.meta.page_count += 1;
-                Ok(id)
-            }
-            Some(head) => {
-                let trunk = self.fetch(st, head)?;
-                let count = freelist::count(&trunk);
-                if count > 0 {
-                    let id = freelist::id_at(&trunk, count - 1);
-                    let mut next = *trunk;
-                    freelist::set_count(&mut next, count - 1);
-                    page::finalize(&mut next, PageType::Freelist, head);
-                    st.cache.insert(head.get(), Arc::from(Box::new(next)), true);
-                    st.meta.freelist_len -= 1;
-                    Ok(PageId::new(id))
-                } else {
-                    // Empty trunk: hand out the trunk page itself.
-                    let next = freelist::next(&trunk);
-                    st.meta.freelist_head = if next == 0 {
-                        None
-                    } else {
-                        Some(PageId::new(next))
-                    };
-                    Ok(head)
-                }
-            }
-        }
-    }
-
-    fn init_trunk(&self, st: &mut State, id: PageId, next: u64) {
-        let mut frame = page::zeroed();
-        freelist::set_next(&mut frame, next);
-        freelist::set_count(&mut frame, 0);
-        page::finalize(&mut frame, PageType::Freelist, id);
-        st.cache.insert(id.get(), Arc::from(frame), true);
     }
 
     /// Read a committed page straight from the backend (bypassing the cache),

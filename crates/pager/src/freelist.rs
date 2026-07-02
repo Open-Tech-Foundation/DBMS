@@ -1,9 +1,13 @@
-//! Free-page allocator: a linked chain of trunk pages holding free page ids.
+//! Free-page list: a linked chain of trunk pages holding free page ids.
 //!
 //! A trunk page's payload is `next: u64` (the next trunk, 0 = end), `count: u32`
-//! (ids stored here), then `count` little-endian `u64` ids. When a trunk is
-//! emptied by allocation, the trunk page itself is handed out, and the chain
-//! head advances to `next`. This mirrors the classic SQLite free-list shape.
+//! (ids stored here), then `count` little-endian `u64` ids.
+//!
+//! This is only the **durable serialization** of the free set: the authoritative
+//! set lives in memory in the pager, and the chain is rebuilt into fresh,
+//! crash-safe pages at each commit (see `pager::Pager::rebuild_free_list`) rather
+//! than mutated in place — an in-place trunk write flushed before the meta swap
+//! would corrupt the last committed meta's free-list on a crash.
 
 use crate::page::{self, Frame, HEADER_SIZE};
 

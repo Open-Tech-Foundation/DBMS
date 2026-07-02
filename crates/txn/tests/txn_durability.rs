@@ -95,6 +95,51 @@ fn crash_at_any_commit_fsync_boundary_recovers_consistently() {
 }
 
 #[test]
+fn the_free_list_survives_a_crash_mid_commit() {
+    // Regression: the free-list used to be mutated in place and flushed before
+    // the meta swap, so a crash between the data sync and the meta swap left the
+    // recovered (old) meta pointing at trunk pages the interrupted commit had
+    // already repurposed — a corrupt free-list on reopen. Churn the free-list
+    // (overwrite keys many times so CoW supersedes pages that get reclaimed into
+    // trunks), then crash at each commit I/O boundary and require a valid
+    // free-list on recovery.
+    for point in [FaultPoint::Sync, FaultPoint::Write] {
+        for occurrence in 1u64..=8 {
+            let backend: Shared = Arc::new(FaultInjectingBackend::new(MemoryBackend::new()));
+            {
+                let db = Db::create(Arc::clone(&backend)).unwrap();
+                for round in 0u8..8 {
+                    for i in 0u8..30 {
+                        db.put(vec![b'k', i], vec![round; 200]).unwrap();
+                    }
+                }
+                drop(db);
+            }
+            backend.reset_counters();
+            backend.arm(point, occurrence);
+            let db = Db::open(Arc::clone(&backend)).unwrap();
+            let _ = db.put(b"zzz".to_vec(), b"new".to_vec());
+            drop(db);
+            backend.disarm();
+
+            // The reopened database must have a structurally valid free-list.
+            let db = Db::open(Arc::clone(&backend)).unwrap();
+            db.validate()
+                .unwrap_or_else(|e| panic!("{point:?}#{occurrence}: free-list corrupt: {e}"));
+            // And every committed key is still present (last-written value).
+            let snap = db.snapshot();
+            for i in 0u8..30 {
+                assert_eq!(
+                    snap.get(&[b'k', i]).unwrap().as_deref(),
+                    Some(&[7u8; 200][..]),
+                    "{point:?}#{occurrence}: committed key lost"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn committed_transactions_survive_a_clean_reopen() {
     let backend = with_baseline();
     let scan = reopened_scan(Arc::clone(&backend));

@@ -14,11 +14,16 @@
 //! - **6** — an optimistic (version-guarded) update is first-committer-wins.
 //! - **7** — guard-rule enforcement: a blind absolute set to a guarded column,
 //!   and a selector-less update/delete, are both rejected.
+//! - **8** — crash durability: a fault injected at every commit I/O boundary
+//!   recovers to a valid database that reflects exactly the committed rows.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::sync::{Arc, Barrier};
 use std::thread;
 
+use common::{
+    Clock, FaultInjectingBackend, FaultPoint, MemoryBackend, Rng, SeededRng, SystemClock,
+};
 use otf_dbms::{
     AggFunc, ArithOp, CheckCmpOp, CheckExpr, ClauseSelect, CmpOp, ColumnDef, Database, Dir,
     ErrorCategory, Expr, IndexDef, Insert, JoinKind, JoinSpec, Projection, Request, Select,
@@ -272,7 +277,9 @@ fn bank() -> Database<common::MemoryBackend> {
             "accounts",
             vec![
                 ColumnDef::new("id", TypeKind::I64),
-                ColumnDef::new("balance", TypeKind::I64).not_null().guarded(),
+                ColumnDef::new("balance", TypeKind::I64)
+                    .not_null()
+                    .guarded(),
                 ColumnDef::new("version", TypeKind::I64).rowversion(),
             ],
             vec!["id"],
@@ -421,4 +428,96 @@ fn a_selectorless_update_or_delete_is_rejected() {
         .unwrap_err();
     assert_eq!(delete.category(), ErrorCategory::Validation);
     assert_eq!(balance_of(&db), 100);
+}
+
+// --- scenario 8: crash durability --------------------------------------------
+
+type FaultBackend = Arc<FaultInjectingBackend<MemoryBackend>>;
+
+fn services() -> (Arc<dyn Clock>, Arc<dyn Rng>) {
+    (Arc::new(SystemClock), Arc::new(SeededRng::new(0x0C0FFEE)))
+}
+
+/// A fault backend with 20 committed `items` rows as the durable baseline.
+fn crash_baseline() -> FaultBackend {
+    let backend: FaultBackend = Arc::new(FaultInjectingBackend::new(MemoryBackend::new()));
+    let (clock, rng) = services();
+    let db = Database::create_with(Arc::clone(&backend), clock, rng).unwrap();
+    db.create_table(TableDef::new(
+        "items",
+        vec![
+            ColumnDef::new("id", TypeKind::I64),
+            ColumnDef::new("v", TypeKind::I64).not_null(),
+        ],
+        vec!["id"],
+    ))
+    .unwrap();
+    for id in 0..20 {
+        insert(&db, "items", vec![("id", id), ("v", id * 10)]);
+    }
+    db.close();
+    backend
+}
+
+fn scan_items() -> Request {
+    Request::Select(Select::Pipeline(vec![Stage::Scan(tref("items"))]))
+}
+
+#[test]
+fn a_crash_during_a_write_recovers_with_no_torn_state() {
+    // A fresh-page commit writes data pages, syncs, writes the meta, and syncs
+    // again. Trip each I/O occurrence in turn: whatever the file holds at the
+    // crash, a reopen is valid (integrity check passes), keeps every committed
+    // row, and the interrupted insert is atomic — fully present or fully absent,
+    // never torn or phantom.
+    for point in [FaultPoint::Sync, FaultPoint::Write] {
+        for occurrence in 1u64..=6 {
+            let backend = crash_baseline();
+            backend.reset_counters();
+            backend.arm(point, occurrence);
+
+            let (clock, rng) = services();
+            let db = Database::open_with(Arc::clone(&backend), clock, rng).unwrap();
+            let result = db.execute(&Request::Insert(Insert {
+                table: "items".into(),
+                rows: vec![vec![
+                    ("id".into(), Value::I64(999)),
+                    ("v".into(), Value::I64(999)),
+                ]],
+            }));
+            db.close();
+            backend.disarm();
+
+            // Reopen the crashed file: it must recover cleanly.
+            let (clock, rng) = services();
+            let db = Database::open_with(Arc::clone(&backend), clock, rng).unwrap();
+            db.check()
+                .unwrap_or_else(|e| panic!("{point:?}#{occurrence}: recovered file corrupt: {e}"));
+
+            let out = db.execute(&scan_items()).unwrap();
+            let ids: Vec<i64> = out
+                .rows()
+                .map(|r| r.get_i64("id").unwrap().unwrap())
+                .collect();
+            for id in 0..20 {
+                assert!(
+                    ids.contains(&id),
+                    "{point:?}#{occurrence}: committed baseline row {id} lost"
+                );
+            }
+            let has_extra = ids.contains(&999);
+            if result.is_ok() {
+                assert!(
+                    has_extra,
+                    "{point:?}#{occurrence}: an acknowledged insert was lost on recovery"
+                );
+            }
+            assert_eq!(
+                out.len(),
+                20 + usize::from(has_extra),
+                "{point:?}#{occurrence}: row-count drift after recovery"
+            );
+            db.close();
+        }
+    }
 }
