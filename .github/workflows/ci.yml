@@ -31,6 +31,20 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  loom:
+    name: loom concurrency model
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The registry's writer/reader handoff is proved by a `loom` model, built
+      # only under `--cfg loom`. Run it in CI so the concurrency proof can't rot.
+      - name: loom model check
+        run: cargo test -p txn --test loom_registry --release --locked
+        env:
+          RUSTFLAGS: --cfg loom -D warnings
+
   supply-chain:
     name: audit · deny
     runs-on: ubuntu-latest

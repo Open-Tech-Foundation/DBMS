@@ -10,6 +10,11 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 
 ### Phase 11 — Hardening
 
+#### Changed
+- CI: added a **loom** job that runs the registry's writer/reader model
+  (`RUSTFLAGS=--cfg loom`) on every push/PR, so the concurrency proof can't
+  silently rot.
+
 #### Fixed
 - `txn`: a **rejected transaction now reclaims the pages it allocated**. A
   multi-op batch that mutates and then fails (violating validate-then-apply)
