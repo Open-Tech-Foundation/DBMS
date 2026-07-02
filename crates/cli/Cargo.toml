@@ -12,6 +12,9 @@ description = "REPL, scenario runner, and concurrency playground (Phase 11)."
 [[bin]]
 name = "otf-dbms"
 path = "src/main.rs"
+# The binary shares its name with the `otf-dbms` library crate; skip rustdoc for
+# it to avoid a doc output-path collision (a CLI needs no published HTML docs).
+doc = false
 
 [dependencies]
 otf-dbms.workspace = true
