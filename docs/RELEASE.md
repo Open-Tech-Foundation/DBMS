@@ -88,8 +88,8 @@ The MessagePack wire protocol is the enabling asset: the FFI boundary is
 | Cursor stability | Snapshot-owning keyset cursor | Depends on journal mode |
 | Typing | Static typed columns | Dynamic (type affinity) |
 | Types | null, bool, i64, f64, text, blob, uuid, json, timestamp | null, int, real, text, blob (JSON via ext) |
-| Constraints | PK, NOT NULL, UNIQUE, CHECK, DEFAULT, FK (RESTRICT), auto-inc, generators, rowversion | PK, NOT NULL, UNIQUE, CHECK, DEFAULT, FK |
-| Foreign keys | RESTRICT (composite/self-ref); CASCADE/SET NULL staged | Yes (all actions) |
+| Constraints | PK, NOT NULL, UNIQUE, CHECK, DEFAULT, FK, auto-inc, generators, rowversion | PK, NOT NULL, UNIQUE, CHECK, DEFAULT, FK |
+| Foreign keys | on_delete RESTRICT/CASCADE/SET NULL (composite/self-ref); on_update cascades staged | Yes (all actions) |
 | Indexes | B+tree single/composite/unique, auto-maintained | B+tree, partial, expression, covering |
 | Joins | INNER, LEFT, CROSS (nested-loop, index-assisted) | + RIGHT/FULL, subqueries, CTEs, windows |
 | Aggregates | COUNT/SUM/MIN/MAX/AVG + GROUP/HAVING | Full + window functions |

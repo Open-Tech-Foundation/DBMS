@@ -332,13 +332,15 @@ fn invalid_schema(reason: String) -> CatalogError {
 /// A self-referential key resolves against `def` itself (not yet stored).
 fn validate_fks<B: IoBackend>(ctx: &WriteCtx<'_, B>, def: &TableDef) -> txn::Result<()> {
     for fk in &def.foreign_keys {
-        // CASCADE / SET NULL are modelled and persisted, but not yet enforced;
-        // only RESTRICT (the default) is honoured this release. Reject the
-        // others at DDL time rather than silently ignoring them at write time.
-        if fk.on_delete != RefAction::Restrict || fk.on_update != RefAction::Restrict {
+        // `on_delete` supports RESTRICT / CASCADE / SET NULL. `on_update`
+        // actions other than RESTRICT are not yet enforced: primary keys are
+        // immutable, so `on_update` only ever fires for a key referencing a
+        // UNIQUE non-PK column, and a cascading key change would have to move a
+        // child's own primary key — deferred. Reject them at DDL time.
+        if fk.on_update != RefAction::Restrict {
             return Err(rej(invalid_schema(format!(
-                "foreign key {:?}: only the RESTRICT referential action is supported \
-                 in this release (CASCADE and SET NULL are not yet enforced)",
+                "foreign key {:?}: on_update CASCADE / SET NULL is not yet supported \
+                 (on_delete supports RESTRICT, CASCADE, and SET NULL)",
                 fk.name
             ))));
         }
@@ -734,37 +736,21 @@ fn delete<B: IoBackend>(
     pk: &[Value],
 ) -> txn::Result<JobOut> {
     let def = load_table(ctx, table)?;
-    let mut data_root = load_root(ctx, table)?;
-    let mut index_roots = load_index_roots(ctx, &def)?;
+    let data_root = load_root(ctx, table)?;
     let pk_key = encode_pk(table, &def, pk).map_err(rej)?;
     let Some(bytes) = ctx.lookup(data_root, &pk_key)? else {
         return Ok(JobOut::Deleted(false));
     };
     let row = decode_padded(&def, &bytes).map_err(rej)?;
 
-    // Referenced-side enforcement: refuse to orphan a child (RESTRICT).
+    // Referenced-side enforcement: plan the referential closure (CASCADE
+    // deletes, SET NULL rewrites), reject any surviving RESTRICT reference, then
+    // apply — all validation before the first mutation (no-op on reject).
     let tables = all_tables(ctx)?;
-    let excluded: HashSet<Vec<u8>> = std::iter::once(pk_key.clone()).collect();
-    check_restrict_on_remove(ctx, &def, std::slice::from_ref(&row), &excluded, &tables)?;
-
-    data_root = ctx.delete(data_root, &pk_key)?;
-    let mut touched = Vec::new();
-    for (i, idx) in def.indexes.iter().enumerate() {
-        if let Some(e) = entry_for(&def, idx, &row, &pk_key)? {
-            index_roots[i] = index::remove_entry(ctx, index_roots[i], &e).map_err(idx_err)?;
-            touched.push(i);
-        }
-    }
-    store_entry(
-        ctx,
-        store::root_key(table).map_err(rej)?,
-        store::encode_root(data_root),
-    )?;
-    for i in touched {
-        if let Some(idx) = def.indexes.get(i) {
-            store_iroot(ctx, table, &idx.name, index_roots[i])?;
-        }
-    }
+    let plan = plan_cascade(ctx, &tables, vec![(table.to_string(), pk_key, row)])?;
+    check_cascade_restrict(ctx, &tables, &plan)?;
+    validate_cascade_rewrites(ctx, &tables, &plan)?;
+    apply_cascade(ctx, &tables, plan)?;
     Ok(JobOut::Deleted(true))
 }
 
@@ -947,59 +933,31 @@ fn delete_where<B: IoBackend>(
     filter: &dyn crate::RowFilter,
 ) -> txn::Result<JobOut> {
     let def = load_table(ctx, table)?;
-    let mut data_root = load_root(ctx, table)?;
-    let mut index_roots = load_index_roots(ctx, &def)?;
+    let data_root = load_root(ctx, table)?;
 
-    // ---- validation (read-only): collect the doomed rows and their entries.
-    // Per matched row: its PK key and the (index, entry) pairs to remove.
-    type Doomed = (Vec<u8>, Vec<(usize, Entry)>);
-    let mut matched: Vec<Doomed> = Vec::new();
-    let mut doomed_rows: Vec<Vec<Value>> = Vec::new();
-    let mut doomed_pks: HashSet<Vec<u8>> = HashSet::new();
+    // ---- validation (read-only): collect the directly matched (seed) rows. ----
+    let mut seeds: Vec<(String, Vec<u8>, Vec<Value>)> = Vec::new();
     for (pk_key, bytes) in ctx.scan(data_root, None, None)? {
         let row = decode_padded(&def, &bytes).map_err(rej)?;
         if !filter.matches(&def, &row).map_err(TxnError::Rejected)? {
             continue;
         }
-        let mut entries = Vec::new();
-        for (i, idx) in def.indexes.iter().enumerate() {
-            if let Some(e) = entry_for(&def, idx, &row, &pk_key)? {
-                entries.push((i, e));
-            }
-        }
-        doomed_pks.insert(pk_key.clone());
-        doomed_rows.push(row);
-        matched.push((pk_key, entries));
+        seeds.push((table.to_string(), pk_key, row));
     }
 
-    // Referenced-side enforcement: refuse to orphan a child (RESTRICT). The
-    // whole doomed batch is excluded, so a self-referential chain removed
-    // together does not block itself.
+    // `affected` is the count of rows the statement deleted directly, not the
+    // cascade closure (matching SQL's reported affected-row semantics).
+    let affected = seeds.len() as u64;
+    if affected == 0 {
+        return Ok(JobOut::Affected(0));
+    }
+
+    // Referenced-side enforcement: plan and apply the referential closure.
     let tables = all_tables(ctx)?;
-    check_restrict_on_remove(ctx, &def, &doomed_rows, &doomed_pks, &tables)?;
-
-    // ---- apply ----
-    let affected = matched.len() as u64;
-    let mut touched: HashSet<usize> = HashSet::new();
-    for (pk_key, entries) in matched {
-        data_root = ctx.delete(data_root, &pk_key)?;
-        for (i, e) in entries {
-            index_roots[i] = index::remove_entry(ctx, index_roots[i], &e).map_err(idx_err)?;
-            touched.insert(i);
-        }
-    }
-    if affected > 0 {
-        store_entry(
-            ctx,
-            store::root_key(table).map_err(rej)?,
-            store::encode_root(data_root),
-        )?;
-        for i in touched {
-            if let Some(idx) = def.indexes.get(i) {
-                store_iroot(ctx, table, &idx.name, index_roots[i])?;
-            }
-        }
-    }
+    let plan = plan_cascade(ctx, &tables, seeds)?;
+    check_cascade_restrict(ctx, &tables, &plan)?;
+    validate_cascade_rewrites(ctx, &tables, &plan)?;
+    apply_cascade(ctx, &tables, plan)?;
     Ok(JobOut::Affected(affected))
 }
 
@@ -1151,34 +1109,400 @@ fn child_references<B: IoBackend>(
     Ok(false)
 }
 
-/// RESTRICT enforcement for the referenced side of a removal: reject while any
-/// child still references a parent row in `removed`. `excluded` is the set of
-/// primary keys being removed from `parent` this write, so self-referential
-/// keys do not block the batch's own deletion. Read-only.
-fn check_restrict_on_remove<B: IoBackend>(
+/// The rows in `child` that reference `key_vals` through `fk`, with their PK
+/// keys. Read-only; a full scan of the child (an index on the referencing
+/// columns is a future optimization).
+fn scan_children<B: IoBackend>(
     ctx: &WriteCtx<'_, B>,
-    parent: &TableDef,
-    removed: &[Vec<Value>],
-    excluded: &HashSet<Vec<u8>>,
-    tables: &[TableDef],
-) -> txn::Result<()> {
-    for child in tables {
-        for fk in &child.foreign_keys {
-            if fk.parent != parent.name {
-                continue;
+    child: &TableDef,
+    fk: &ForeignKey,
+    key_vals: &[Value],
+) -> txn::Result<Vec<(Vec<u8>, Vec<Value>)>> {
+    let root = load_root(ctx, &child.name)?;
+    let mut out = Vec::new();
+    for (cpk, bytes) in ctx.scan(root, None, None)? {
+        let crow = decode_padded(child, &bytes).map_err(rej)?;
+        if fk_values(child, fk, &crow).as_deref() == Some(key_vals) {
+            out.push((cpk, crow));
+        }
+    }
+    Ok(out)
+}
+
+/// A copy of a child `row` with `fk`'s referencing columns set to `new_vals`
+/// (positionally), or to NULL when `new_vals` is `None` (SET NULL).
+fn set_fk_columns(
+    child: &TableDef,
+    fk: &ForeignKey,
+    row: &[Value],
+    new_vals: Option<&[Value]>,
+) -> Vec<Value> {
+    let mut out = row.to_vec();
+    for (i, name) in fk.columns.iter().enumerate() {
+        if let Some(ci) = child.col_index(name) {
+            if let Some(slot) = out.get_mut(ci) {
+                *slot = match new_vals {
+                    Some(vals) => vals.get(i).cloned().unwrap_or(Value::Null),
+                    None => Value::Null,
+                };
             }
-            let self_ref = child.name == parent.name;
-            for row in removed {
-                let Some(key_vals) = parent_key_of(parent, fk, row) else {
+        }
+    }
+    out
+}
+
+/// A parent row whose referenced key is disappearing this write: deleted
+/// (`new_row` is `None`) or rewritten so a referenced column changed.
+struct CascadeEffect {
+    table: String,
+    old_row: Vec<Value>,
+    new_row: Option<Vec<Value>>,
+}
+
+/// A row addressed by its table name and encoded primary key.
+type RowRef = (String, Vec<u8>);
+/// A planned rewrite: `(old_row, new_row)`.
+type Rewrite = (Vec<Value>, Vec<Value>);
+
+/// The full closure of referential effects a set of deleted rows triggers:
+/// rows to delete (CASCADE) and rows to rewrite (SET NULL), keyed by
+/// `(table, pk_key)`. Deletes take precedence over rewrites for the same row.
+#[derive(Default)]
+struct Cascade {
+    deletes: std::collections::BTreeMap<RowRef, Vec<Value>>,
+    rewrites: std::collections::BTreeMap<RowRef, Rewrite>,
+    /// Every effect processed, for the RESTRICT validation pass.
+    effects: Vec<CascadeEffect>,
+}
+
+/// Plan the referential closure of deleting `seeds` (each `(table, pk_key,
+/// row)`). Follows CASCADE and SET NULL `on_delete` edges (recursively), and
+/// records RESTRICT edges for the separate [`check_cascade_restrict`] pass. The
+/// closure terminates: deletes and rewrites are each recorded at most once per
+/// row, and `on_update` is RESTRICT-only so rewrites spawn no further effects.
+/// Read-only.
+fn plan_cascade<B: IoBackend>(
+    ctx: &WriteCtx<'_, B>,
+    tables: &[TableDef],
+    seeds: Vec<(String, Vec<u8>, Vec<Value>)>,
+) -> txn::Result<Cascade> {
+    let mut plan = Cascade::default();
+    let mut queue: std::collections::VecDeque<CascadeEffect> = std::collections::VecDeque::new();
+    for (table, pk_key, row) in seeds {
+        if plan
+            .deletes
+            .insert((table.clone(), pk_key), row.clone())
+            .is_none()
+        {
+            queue.push_back(CascadeEffect {
+                table,
+                old_row: row,
+                new_row: None,
+            });
+        }
+    }
+
+    while let Some(eff) = queue.pop_front() {
+        let Some(parent) = tables.iter().find(|t| t.name == eff.table) else {
+            continue;
+        };
+        for child in tables {
+            for fk in &child.foreign_keys {
+                if fk.parent != eff.table {
+                    continue;
+                }
+                let Some(old_key) = parent_key_of(parent, fk, &eff.old_row) else {
                     continue;
                 };
-                if child_references(ctx, child, fk, &key_vals, excluded, self_ref)? {
-                    return Err(rej(CatalogError::ReferencedByChildren {
-                        table: child.name.clone(),
-                        constraint: fk.name.clone(),
-                    }));
+                // Which action applies, and (for a key change) whether the
+                // referenced columns actually moved.
+                let action = match &eff.new_row {
+                    None => fk.on_delete,
+                    Some(new_row) => {
+                        if parent_key_of(parent, fk, new_row).as_deref() == Some(old_key.as_slice())
+                        {
+                            continue;
+                        }
+                        fk.on_update
+                    }
+                };
+                if action == RefAction::Restrict {
+                    continue; // deferred to the RESTRICT pass
+                }
+                for (cpk, crow) in scan_children(ctx, child, fk, &old_key)? {
+                    let key = (child.name.clone(), cpk);
+                    if plan.deletes.contains_key(&key) {
+                        continue; // already being removed
+                    }
+                    if action == RefAction::Cascade && eff.new_row.is_none() {
+                        // CASCADE delete: remove the child and recurse.
+                        plan.rewrites.remove(&key);
+                        plan.deletes.insert(key.clone(), crow.clone());
+                        queue.push_back(CascadeEffect {
+                            table: key.0,
+                            old_row: crow,
+                            new_row: None,
+                        });
+                    } else {
+                        // SET NULL (`on_delete`) rewrites the referencing
+                        // columns to NULL. Accumulate onto any rewrite already
+                        // planned for this row (a child referenced by several
+                        // removed parents) so no nulling is lost.
+                        let base = plan
+                            .rewrites
+                            .get(&key)
+                            .map(|(_, n)| n.clone())
+                            .unwrap_or_else(|| crow.clone());
+                        let cnew = set_fk_columns(child, fk, &base, None);
+                        let changed = plan
+                            .rewrites
+                            .get(&key)
+                            .map(|(_, n)| n != &cnew)
+                            .unwrap_or(true);
+                        plan.rewrites
+                            .insert(key.clone(), (crow.clone(), cnew.clone()));
+                        if changed {
+                            queue.push_back(CascadeEffect {
+                                table: key.0,
+                                old_row: crow,
+                                new_row: Some(cnew),
+                            });
+                        }
+                    }
                 }
             }
+        }
+        plan.effects.push(eff);
+    }
+    Ok(plan)
+}
+
+/// RESTRICT check over a planned closure: for every effect (a removed or
+/// key-changed parent row), reject if any *surviving* child still references the
+/// disappearing key through a RESTRICT foreign key. A child that is itself being
+/// deleted, or rewritten off the key, does not count. Read-only.
+fn check_cascade_restrict<B: IoBackend>(
+    ctx: &WriteCtx<'_, B>,
+    tables: &[TableDef],
+    plan: &Cascade,
+) -> txn::Result<()> {
+    for eff in &plan.effects {
+        let Some(parent) = tables.iter().find(|t| t.name == eff.table) else {
+            continue;
+        };
+        for child in tables {
+            for fk in &child.foreign_keys {
+                if fk.parent != eff.table {
+                    continue;
+                }
+                let Some(old_key) = parent_key_of(parent, fk, &eff.old_row) else {
+                    continue;
+                };
+                let restrict = match &eff.new_row {
+                    None => fk.on_delete == RefAction::Restrict,
+                    Some(new_row) => {
+                        if parent_key_of(parent, fk, new_row).as_deref() == Some(old_key.as_slice())
+                        {
+                            continue;
+                        }
+                        fk.on_update == RefAction::Restrict
+                    }
+                };
+                if !restrict {
+                    continue;
+                }
+                for (cpk, crow) in scan_children(ctx, child, fk, &old_key)? {
+                    let key = (child.name.clone(), cpk);
+                    if plan.deletes.contains_key(&key) {
+                        continue; // child is going away
+                    }
+                    // Honour a rewrite that moves the child off this key.
+                    let effective = plan.rewrites.get(&key).map(|(_, n)| n).unwrap_or(&crow);
+                    if fk_values(child, fk, effective).as_deref() == Some(old_key.as_slice()) {
+                        return Err(rej(CatalogError::ReferencedByChildren {
+                            table: child.name.clone(),
+                            constraint: fk.name.clone(),
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate every planned SET NULL rewrite against the child's own constraints
+/// before any mutation: CHECK (3VL), NOT NULL, and unique indexes across the
+/// whole closure (deletes free keys; rewrites move them). Read-only.
+fn validate_cascade_rewrites<B: IoBackend>(
+    ctx: &WriteCtx<'_, B>,
+    tables: &[TableDef],
+    plan: &Cascade,
+) -> txn::Result<()> {
+    let find = |name: &str| tables.iter().find(|t| t.name == name);
+
+    for ((tname, _pk), (_, new_row)) in &plan.rewrites {
+        let Some(def) = find(tname) else { continue };
+        run_checks(def, new_row).map_err(rej)?;
+        for (ci, cell) in new_row.iter().enumerate() {
+            if matches!(cell, Value::Null) && !def.is_nullable(ci) {
+                return Err(rej(CatalogError::NotNull {
+                    table: tname.clone(),
+                    column: def
+                        .columns
+                        .get(ci)
+                        .map(|c| c.name.clone())
+                        .unwrap_or_default(),
+                }));
+            }
+        }
+    }
+
+    // Unique indexes across the closure: a rewrite's new key must not collide
+    // with a surviving committed entry or with another rewrite's new key.
+    let mut removed: std::collections::HashMap<(String, usize), HashSet<Vec<u8>>> =
+        std::collections::HashMap::new();
+    let mut added: std::collections::HashMap<(String, usize), Vec<Vec<u8>>> =
+        std::collections::HashMap::new();
+    for ((tname, pk), row) in &plan.deletes {
+        let Some(def) = find(tname) else { continue };
+        for (i, idx) in def.indexes.iter().enumerate() {
+            if idx.unique {
+                if let Some(e) = entry_for(def, idx, row, pk)? {
+                    removed.entry((tname.clone(), i)).or_default().insert(e.key);
+                }
+            }
+        }
+    }
+    for ((tname, pk), (old_row, new_row)) in &plan.rewrites {
+        let Some(def) = find(tname) else { continue };
+        for (i, idx) in def.indexes.iter().enumerate() {
+            if !idx.unique {
+                continue;
+            }
+            let old_e = entry_for(def, idx, old_row, pk)?;
+            let new_e = entry_for(def, idx, new_row, pk)?;
+            if old_e.as_ref().map(|e| &e.key) == new_e.as_ref().map(|e| &e.key) {
+                continue;
+            }
+            if let Some(e) = old_e {
+                removed.entry((tname.clone(), i)).or_default().insert(e.key);
+            }
+            if let Some(e) = new_e {
+                added.entry((tname.clone(), i)).or_default().push(e.key);
+            }
+        }
+    }
+    for ((tname, i), keys) in &added {
+        let Some(def) = find(tname) else { continue };
+        let Some(idx) = def.indexes.get(*i) else {
+            continue;
+        };
+        let iroot = load_iroot(ctx, tname, &idx.name)?;
+        let gone = removed.get(&(tname.clone(), *i));
+        let mut seen: HashSet<&Vec<u8>> = HashSet::new();
+        for key in keys {
+            let committed = ctx.lookup(iroot, key)?.is_some();
+            let freed = gone.is_some_and(|g| g.contains(key));
+            if (committed && !freed) || !seen.insert(key) {
+                return Err(rej(unique_violation(tname, &idx.name)));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Apply a planned closure: delete every doomed row and rewrite every SET NULL
+/// row, each with full secondary-index maintenance. Runs only after the whole
+/// closure has been validated, so it cannot fail partway on a constraint.
+fn apply_cascade<B: IoBackend>(
+    ctx: &mut WriteCtx<'_, B>,
+    tables: &[TableDef],
+    plan: Cascade,
+) -> txn::Result<()> {
+    for ((tname, pk_key), row) in &plan.deletes {
+        let Some(def) = tables.iter().find(|t| t.name == *tname) else {
+            continue;
+        };
+        delete_row_indexed(ctx, def, pk_key, row)?;
+    }
+    for ((tname, pk_key), (old_row, new_row)) in &plan.rewrites {
+        let Some(def) = tables.iter().find(|t| t.name == *tname) else {
+            continue;
+        };
+        rewrite_row_indexed(ctx, def, pk_key, old_row, new_row)?;
+    }
+    Ok(())
+}
+
+/// Delete one row and every secondary-index entry it contributes, persisting
+/// the table's data root and touched index roots.
+fn delete_row_indexed<B: IoBackend>(
+    ctx: &mut WriteCtx<'_, B>,
+    def: &TableDef,
+    pk_key: &[u8],
+    row: &[Value],
+) -> txn::Result<()> {
+    let mut data_root = load_root(ctx, &def.name)?;
+    let mut index_roots = load_index_roots(ctx, def)?;
+    data_root = ctx.delete(data_root, pk_key)?;
+    let mut touched = Vec::new();
+    for (i, idx) in def.indexes.iter().enumerate() {
+        if let Some(e) = entry_for(def, idx, row, pk_key)? {
+            index_roots[i] = index::remove_entry(ctx, index_roots[i], &e).map_err(idx_err)?;
+            touched.push(i);
+        }
+    }
+    store_entry(
+        ctx,
+        store::root_key(&def.name).map_err(rej)?,
+        store::encode_root(data_root),
+    )?;
+    for i in touched {
+        if let Some(idx) = def.indexes.get(i) {
+            store_iroot(ctx, &def.name, &idx.name, index_roots[i])?;
+        }
+    }
+    Ok(())
+}
+
+/// Rewrite one row in place (same primary key) and move its changed
+/// secondary-index entries, persisting the affected roots.
+fn rewrite_row_indexed<B: IoBackend>(
+    ctx: &mut WriteCtx<'_, B>,
+    def: &TableDef,
+    pk_key: &[u8],
+    old_row: &[Value],
+    new_row: &[Value],
+) -> txn::Result<()> {
+    let mut data_root = load_root(ctx, &def.name)?;
+    let mut index_roots = load_index_roots(ctx, def)?;
+    let new_bytes = encode_row(new_row).map_err(|e| rej(e.into()))?;
+    btree::check_entry(pk_key, &new_bytes).map_err(TxnError::BTree)?;
+    data_root = ctx.insert(data_root, pk_key, &new_bytes)?;
+    let mut touched = Vec::new();
+    for (i, idx) in def.indexes.iter().enumerate() {
+        let old_e = entry_for(def, idx, old_row, pk_key)?;
+        let new_e = entry_for(def, idx, new_row, pk_key)?;
+        if old_e.as_ref().map(|e| &e.key) == new_e.as_ref().map(|e| &e.key) {
+            continue;
+        }
+        if let Some(e) = old_e {
+            index_roots[i] = index::remove_entry(ctx, index_roots[i], &e).map_err(idx_err)?;
+        }
+        if let Some(e) = new_e {
+            index_roots[i] = index::insert_entry(ctx, index_roots[i], &e).map_err(idx_err)?;
+        }
+        touched.push(i);
+    }
+    store_entry(
+        ctx,
+        store::root_key(&def.name).map_err(rej)?,
+        store::encode_root(data_root),
+    )?;
+    for i in touched {
+        if let Some(idx) = def.indexes.get(i) {
+            store_iroot(ctx, &def.name, &idx.name, index_roots[i])?;
         }
     }
     Ok(())

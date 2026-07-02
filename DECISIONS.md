@@ -5,37 +5,47 @@ Per `PLAN.md` §1 rule 6, every resolution of an ambiguity or deviation from
 
 ---
 
-## D32 — Foreign keys ship RESTRICT-only; CASCADE / SET NULL are modelled but deferred
+## D32 — Foreign keys: `on_delete` RESTRICT/CASCADE/SET NULL via a read-only closure planner; `on_update` cascades deferred
 
 **Phase:** v2 schema power (`PLAN.md` §8.2) · **Status:** accepted
 
 Foreign keys were the first v2 "schema power" item pulled forward. The design
-splits cleanly into a referencing side (child `insert`/`update` must find a
-parent key) and a referenced side (parent `delete`/`update` and `drop table`).
-Both are enforced in the writer (`catalog::job`) under the existing
-validate-then-apply contract, so a rejected key is a guaranteed no-op — the same
-guarantee every other constraint already has. Parent existence is probed against
-the parent's PK tree or the referenced `UNIQUE` index (both O(log n)); referenced
+splits into a referencing side (child `insert`/`update` must find a parent key)
+and a referenced side (parent `delete`/`update`, `drop table`). Both are enforced
+in the writer (`catalog::job`) under the existing validate-then-apply contract,
+so a rejected write is a guaranteed no-op. Parent existence is probed against the
+parent's PK tree or the referenced `UNIQUE` index (both O(log n)); referenced
 columns are therefore required at DDL time to be the parent's PK or a unique
 index. `MATCH SIMPLE` (a NULL in any referencing column skips the check) matches
 the row encoding's existing NULL-in-unique-index handling.
 
-**Decision:** enforce **RESTRICT** (the default, and the only *sound-by-refusal*
-action) now, and **reject `CASCADE` / `SET NULL` at DDL time** rather than
-silently ignoring them. Doing cascades correctly requires a read-only closure
-planner (to keep the no-op-on-reject guarantee across a multi-table, possibly
-cyclic cascade) plus full downstream re-validation of every cascaded row against
-its own CHECK / NOT NULL / UNIQUE / outbound-FK constraints and cross-table index
-upkeep — a self-contained increment that deserves its own tests. The actions are
-still modelled (`RefAction`) and persisted (catalog format **v3**), so enabling
-them later is purely additive with no on-disk format change. Referenced-side
-`RESTRICT` on the update path only fires for keys referencing a `UNIQUE` non-PK
-column, since primary keys are immutable in v1 (D-`PkImmutable`).
+**Decision:** `on_delete` supports **RESTRICT**, **CASCADE**, and **SET NULL**.
+To keep the no-op-on-reject guarantee across a multi-table, possibly cyclic
+cascade, the referenced side runs in three read-only phases before any mutation:
+(1) `plan_cascade` builds the full closure of doomed rows (CASCADE, recursive)
+and rewritten rows (SET NULL), following only CASCADE/SET NULL edges; (2)
+`check_cascade_restrict` rejects if any *surviving* child still references a
+disappearing key through a RESTRICT edge; (3) `validate_cascade_rewrites`
+re-checks every SET NULL row against its own CHECK / NOT NULL / UNIQUE (across the
+whole closure). Only then does `apply_cascade` delete and rewrite with full
+secondary-index upkeep. Termination holds: each row is recorded at most once, and
+`on_update` is RESTRICT-only so rewrites spawn no further deletes.
 
-**Alternatives rejected:** (a) shipping CASCADE half-done, which would either
-break the no-op guarantee mid-cascade or skip downstream constraint checks —
-unsound; (b) enforcing the referenced side by scanning with no DDL requirement on
-the parent columns, which would make every child probe O(n) instead of O(log n).
+**`on_update` CASCADE / SET NULL are deferred** (rejected at DDL): PKs are
+immutable, so `on_update` only fires for a key referencing an *updatable* `UNIQUE`
+non-PK column — a niche — and a cascading key change could have to move a child's
+own primary key (which v1 forbids, `PkImmutable`). The actions remain modelled
+(`RefAction`) and persisted (catalog format **v3**), so enabling them later is
+additive with no on-disk change.
+
+**Alternatives rejected:** (a) applying cascades eagerly row-by-row, which would
+break the no-op guarantee when a downstream RESTRICT or SET-NULL-violates-CHECK is
+hit mid-cascade; (b) requiring no DDL constraint on the parent columns, which
+would make every child existence probe O(n) instead of O(log n).
+
+**Known v1 limitation:** the referenced side finds child rows by scanning the
+child table; an index on the referencing columns (to make it O(log n)) is a
+tracked optimization, not yet built.
 
 ---
 

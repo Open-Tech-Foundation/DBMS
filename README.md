@@ -12,8 +12,8 @@ structured (non-SQL) binary query interface.
   under concurrent writes.
 - **Relational core.** Tables with typed columns, primary keys, secondary
   indexes (with index-aware planning), `NOT NULL` / `UNIQUE` / `CHECK` /
-  `DEFAULT` / `FOREIGN KEY` (RESTRICT) constraints, and a validating query
-  layer.
+  `DEFAULT` / `FOREIGN KEY` (`on_delete` RESTRICT / CASCADE / SET NULL)
+  constraints, and a validating query layer.
 - **Safe concurrent writes.** Guarded relative updates and optimistic
   (version-guarded) updates are evaluated inside the single writer, so
   read-check-write is one indivisible step — no TOCTOU, first-committer-wins.

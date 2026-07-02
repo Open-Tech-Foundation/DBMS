@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use catalog::{Catalog, CatalogError, ColumnDef, ForeignKey, RefAction, TableDef};
+use catalog::{Catalog, CatalogError, ColumnDef, ForeignKey, IndexDef, RefAction, TableDef};
 use common::{ManualClock, MemoryBackend, SeededRng};
 use types::{TypeKind, Value};
 
@@ -107,14 +107,240 @@ fn fk_column_type_must_match_the_parent() {
 }
 
 #[test]
-fn cascade_and_set_null_are_not_yet_supported() {
+fn on_update_cascade_is_not_yet_supported() {
     let (cat, _b) = new_catalog();
     cat.create_table(users()).unwrap();
-    let cascade = posts().foreign_key(
-        ForeignKey::new("fk2", vec!["author"], "users", vec!["id"]).on_delete(RefAction::Cascade),
+    // on_delete CASCADE is accepted; on_update CASCADE is not yet.
+    let bad = TableDef::new(
+        "posts",
+        vec![
+            ColumnDef::new("id", TypeKind::I64),
+            ColumnDef::new("author", TypeKind::I64),
+        ],
+        vec!["id"],
+    )
+    .foreign_key(
+        ForeignKey::new("fk", vec!["author"], "users", vec!["id"]).on_update(RefAction::Cascade),
     );
-    let err = cat.create_table(cascade).unwrap_err();
+    let err = cat.create_table(bad).unwrap_err();
     assert!(matches!(err, CatalogError::InvalidSchema { .. }), "{err:?}");
+}
+
+/// `posts.author` → `users.id` with `on_delete` = `action`.
+fn posts_on_delete(action: RefAction) -> TableDef {
+    TableDef::new(
+        "posts",
+        vec![
+            ColumnDef::new("id", TypeKind::I64),
+            ColumnDef::new("author", TypeKind::I64),
+        ],
+        vec!["id"],
+    )
+    .foreign_key(
+        ForeignKey::new("fk_author", vec!["author"], "users", vec!["id"]).on_delete(action),
+    )
+}
+
+#[test]
+fn on_delete_cascade_removes_children() {
+    let (cat, _b) = new_catalog();
+    cat.create_table(users()).unwrap();
+    cat.create_table(posts_on_delete(RefAction::Cascade))
+        .unwrap();
+    cat.insert(
+        "users",
+        row(&[("id", Value::I64(1)), ("name", Value::Text("ada".into()))]),
+    )
+    .unwrap();
+    cat.insert(
+        "posts",
+        row(&[("id", Value::I64(10)), ("author", Value::I64(1))]),
+    )
+    .unwrap();
+    cat.insert(
+        "posts",
+        row(&[("id", Value::I64(11)), ("author", Value::I64(1))]),
+    )
+    .unwrap();
+
+    assert!(cat.delete("users", vec![Value::I64(1)]).unwrap());
+    let snap = cat.snapshot();
+    assert_eq!(
+        snap.row_count("posts").unwrap(),
+        0,
+        "children cascaded away"
+    );
+    assert_eq!(snap.row_count("users").unwrap(), 0);
+}
+
+#[test]
+fn on_delete_set_null_nulls_children() {
+    let (cat, _b) = new_catalog();
+    cat.create_table(users()).unwrap();
+    cat.create_table(posts_on_delete(RefAction::SetNull))
+        .unwrap();
+    cat.insert(
+        "users",
+        row(&[("id", Value::I64(1)), ("name", Value::Text("ada".into()))]),
+    )
+    .unwrap();
+    cat.insert(
+        "posts",
+        row(&[("id", Value::I64(10)), ("author", Value::I64(1))]),
+    )
+    .unwrap();
+
+    assert!(cat.delete("users", vec![Value::I64(1)]).unwrap());
+    let snap = cat.snapshot();
+    let post = snap.get("posts", &[Value::I64(10)]).unwrap().unwrap();
+    assert_eq!(post[1], Value::Null, "author nulled out");
+    assert_eq!(snap.row_count("posts").unwrap(), 1, "child survives");
+}
+
+#[test]
+fn cascade_recurses_through_a_chain() {
+    // users <- posts <- comments, both edges CASCADE.
+    let (cat, _b) = new_catalog();
+    cat.create_table(users()).unwrap();
+    cat.create_table(posts_on_delete(RefAction::Cascade))
+        .unwrap();
+    cat.create_table(
+        TableDef::new(
+            "comments",
+            vec![
+                ColumnDef::new("id", TypeKind::I64),
+                ColumnDef::new("post", TypeKind::I64),
+            ],
+            vec!["id"],
+        )
+        .foreign_key(
+            ForeignKey::new("fk_post", vec!["post"], "posts", vec!["id"])
+                .on_delete(RefAction::Cascade),
+        ),
+    )
+    .unwrap();
+
+    cat.insert(
+        "users",
+        row(&[("id", Value::I64(1)), ("name", Value::Text("ada".into()))]),
+    )
+    .unwrap();
+    cat.insert(
+        "posts",
+        row(&[("id", Value::I64(10)), ("author", Value::I64(1))]),
+    )
+    .unwrap();
+    cat.insert(
+        "comments",
+        row(&[("id", Value::I64(100)), ("post", Value::I64(10))]),
+    )
+    .unwrap();
+
+    assert!(cat.delete("users", vec![Value::I64(1)]).unwrap());
+    let snap = cat.snapshot();
+    assert_eq!(snap.row_count("posts").unwrap(), 0);
+    assert_eq!(
+        snap.row_count("comments").unwrap(),
+        0,
+        "grandchild cascaded away"
+    );
+}
+
+#[test]
+fn a_downstream_restrict_blocks_a_cascade() {
+    // users <-CASCADE- posts <-RESTRICT- comments. Deleting the user would
+    // cascade-delete the post, but a comment restricts the post → whole delete
+    // is rejected and nothing changes.
+    let (cat, _b) = new_catalog();
+    cat.create_table(users()).unwrap();
+    cat.create_table(posts_on_delete(RefAction::Cascade))
+        .unwrap();
+    cat.create_table(
+        TableDef::new(
+            "comments",
+            vec![
+                ColumnDef::new("id", TypeKind::I64),
+                ColumnDef::new("post", TypeKind::I64),
+            ],
+            vec!["id"],
+        )
+        .foreign_key(ForeignKey::new(
+            "fk_post",
+            vec!["post"],
+            "posts",
+            vec!["id"],
+        )),
+    )
+    .unwrap();
+
+    cat.insert(
+        "users",
+        row(&[("id", Value::I64(1)), ("name", Value::Text("ada".into()))]),
+    )
+    .unwrap();
+    cat.insert(
+        "posts",
+        row(&[("id", Value::I64(10)), ("author", Value::I64(1))]),
+    )
+    .unwrap();
+    cat.insert(
+        "comments",
+        row(&[("id", Value::I64(100)), ("post", Value::I64(10))]),
+    )
+    .unwrap();
+
+    let err = cat.delete("users", vec![Value::I64(1)]).unwrap_err();
+    assert!(
+        matches!(err, CatalogError::ReferencedByChildren { .. }),
+        "{err:?}"
+    );
+    // The whole operation was a no-op.
+    let snap = cat.snapshot();
+    assert_eq!(snap.row_count("users").unwrap(), 1);
+    assert_eq!(snap.row_count("posts").unwrap(), 1);
+    assert_eq!(snap.row_count("comments").unwrap(), 1);
+}
+
+#[test]
+fn self_referential_cascade_deletes_the_subtree() {
+    let (cat, _b) = new_catalog();
+    cat.create_table(
+        TableDef::new(
+            "nodes",
+            vec![
+                ColumnDef::new("id", TypeKind::I64),
+                ColumnDef::new("parent", TypeKind::I64),
+            ],
+            vec!["id"],
+        )
+        .foreign_key(
+            ForeignKey::new("fk_parent", vec!["parent"], "nodes", vec!["id"])
+                .on_delete(RefAction::Cascade),
+        ),
+    )
+    .unwrap();
+    cat.insert(
+        "nodes",
+        row(&[("id", Value::I64(1)), ("parent", Value::Null)]),
+    )
+    .unwrap();
+    cat.insert(
+        "nodes",
+        row(&[("id", Value::I64(2)), ("parent", Value::I64(1))]),
+    )
+    .unwrap();
+    cat.insert(
+        "nodes",
+        row(&[("id", Value::I64(3)), ("parent", Value::I64(2))]),
+    )
+    .unwrap();
+
+    assert!(cat.delete("nodes", vec![Value::I64(1)]).unwrap());
+    assert_eq!(
+        cat.snapshot().row_count("nodes").unwrap(),
+        0,
+        "subtree gone"
+    );
 }
 
 // --- referencing side (child insert / update) --------------------------------
@@ -291,6 +517,86 @@ fn self_referential_key_enforces_and_restricts() {
     // A leaf deletes cleanly, and does not block its own removal.
     assert!(cat.delete("employees", vec![Value::I64(2)]).unwrap());
     assert!(cat.delete("employees", vec![Value::I64(1)]).unwrap());
+}
+
+// --- index consistency across a cascade --------------------------------------
+
+/// `posts` with both a unique index (`slug`) and a non-unique one (`by_author`),
+/// referencing `users` with the given `on_delete` action.
+fn indexed_posts(action: RefAction) -> TableDef {
+    TableDef::new(
+        "posts",
+        vec![
+            ColumnDef::new("id", TypeKind::I64),
+            ColumnDef::new("author", TypeKind::I64),
+            ColumnDef::new("slug", TypeKind::Text).unique(),
+        ],
+        vec!["id"],
+    )
+    .index(IndexDef::new("by_author", vec!["author"]))
+    .foreign_key(
+        ForeignKey::new("fk_author", vec!["author"], "users", vec!["id"]).on_delete(action),
+    )
+}
+
+/// Create `users` then `posts` (FK requires the parent first) and seed rows.
+fn seed_indexed_posts(cat: &Catalog<Backend>, action: RefAction) {
+    cat.create_table(users()).unwrap();
+    cat.create_table(indexed_posts(action)).unwrap();
+    cat.insert(
+        "users",
+        row(&[("id", Value::I64(1)), ("name", Value::Text("ada".into()))]),
+    )
+    .unwrap();
+    cat.insert(
+        "users",
+        row(&[("id", Value::I64(2)), ("name", Value::Text("bo".into()))]),
+    )
+    .unwrap();
+    for (id, author, slug) in [(10, 1, "a"), (11, 1, "b"), (12, 2, "c")] {
+        cat.insert(
+            "posts",
+            row(&[
+                ("id", Value::I64(id)),
+                ("author", Value::I64(author)),
+                ("slug", Value::Text(slug.into())),
+            ]),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn cascade_delete_keeps_secondary_indexes_consistent() {
+    let (cat, _b) = new_catalog();
+    seed_indexed_posts(&cat, RefAction::Cascade);
+
+    assert!(cat.delete("users", vec![Value::I64(1)]).unwrap());
+    let snap = cat.snapshot();
+    assert_eq!(
+        snap.row_count("posts").unwrap(),
+        1,
+        "author 2's post remains"
+    );
+    // Every index still matches its base table entry-for-entry.
+    snap.validate().unwrap();
+}
+
+#[test]
+fn set_null_keeps_secondary_indexes_consistent() {
+    let (cat, _b) = new_catalog();
+    seed_indexed_posts(&cat, RefAction::SetNull);
+
+    assert!(cat.delete("users", vec![Value::I64(1)]).unwrap());
+    let snap = cat.snapshot();
+    assert_eq!(snap.row_count("posts").unwrap(), 3, "children survive");
+    // Author of posts 10 and 11 is now NULL; the by_author index must reflect
+    // that and still validate.
+    assert_eq!(
+        snap.get("posts", &[Value::I64(10)]).unwrap().unwrap()[1],
+        Value::Null
+    );
+    snap.validate().unwrap();
 }
 
 // --- composite & unique-target -----------------------------------------------

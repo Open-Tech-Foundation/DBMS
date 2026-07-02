@@ -19,11 +19,17 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
   referencing column skips the check).
   - Referencing side: child `insert`/`update` probe the parent's PK tree or the
     referenced unique index (`ForeignKeyViolation` on a miss).
-  - Referenced side: parent `delete`/`update` and `drop table` are **RESTRICT**
-    — blocked while any child still references the row (`ReferencedByChildren`,
-    `TableReferenced`).
-  - `CASCADE` and `SET NULL` are modelled and persisted (catalog format v3) but
-    **not yet enforced**; they are rejected at DDL time this release (D32).
+  - Referenced side, `on_delete`: **`RESTRICT`** (blocked while children exist —
+    `ReferencedByChildren`), **`CASCADE`** (recursively deletes children), and
+    **`SET NULL`** (nulls the children's referencing columns). The full
+    referential closure is planned read-only — a downstream `RESTRICT` (or any
+    constraint a `SET NULL` would break) aborts the whole delete with no
+    mutation. `drop table` of a referenced table is blocked (`TableReferenced`).
+  - `on_update` is `RESTRICT`-only for now (primary keys are immutable, so it
+    only fires for a key referencing a `UNIQUE` non-PK column); `on_update`
+    `CASCADE`/`SET NULL` are rejected at DDL time (D32).
+- Catalog on-disk format bumped to **v3** (the foreign-key section); v1/v2
+  records still decode.
 - `otf-dbms`: re-export `ForeignKey` and `RefAction`.
 
 ### Phase 11 — Playgrounds, hardening & benchmarking
