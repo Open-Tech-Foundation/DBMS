@@ -14,6 +14,9 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 - CI: added a **loom** job that runs the registry's writer/reader model
   (`RUSTFLAGS=--cfg loom`) on every push/PR, so the concurrency proof can't
   silently rot.
+- Docs: recorded that a single write transaction's dirty working set is
+  memory-bounded only — dirty pages are pinned until commit, so no spill exists
+  in v1; a per-transaction dirty-page cap is the tracked mitigation (D29).
 
 #### Fixed
 - `txn`: a **rejected transaction now reclaims the pages it allocated**. A

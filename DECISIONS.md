@@ -5,6 +5,31 @@ Per `PLAN.md` §1 rule 6, every resolution of an ambiguity or deviation from
 
 ---
 
+## D29 — A write transaction's working set is memory-bounded (no spill in v1)
+
+**Phase:** 11 · **Status:** accepted
+
+The page cache pins dirty frames until the next commit (`cache.rs`): they cannot
+be evicted, because evicting an uncommitted page would lose the only copy of a
+pending write. This is correct, but it means a *single* write transaction's
+dirty working set can exceed the cache's byte budget without limit — one huge
+transaction (e.g. a multi-million-row insert in one batch) holds every page it
+touches in memory until commit.
+
+**Decision:** accept this for v1 as a known, documented bound rather than add a
+spill-to-disk path. Rationale: the embedded workloads targeted here commit in
+modest batches, and a redo/undo spill log is a substantial subsystem that would
+duplicate durability machinery the CoW + meta-swap design deliberately avoids.
+The mitigation is an **eventual per-transaction dirty-page cap** — the write-side
+counterpart to the read-side resource caps ([[per-query-resource-caps]], PLAN
+§4), rejecting an over-large transaction with a `ResourceLimit` error instead of
+letting it consume unbounded memory. Until that lands, callers bound their own
+batch sizes. Tracked as a Phase-11+ item; recorded here so the "LRU page cache
+with a configurable byte budget" description is not mistaken for a hard cap on a
+transaction's footprint.
+
+---
+
 ## D28 — A rejected transaction reclaims the pages it allocated
 
 **Phase:** 11 · **Status:** accepted
