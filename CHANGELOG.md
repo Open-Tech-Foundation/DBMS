@@ -35,6 +35,9 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
   in v1; a per-transaction dirty-page cap is the tracked mitigation (D29).
 
 #### Fixed
+- `catalog`: a **type-mismatch error is now `Validation`, not `Constraint`** —
+  `SPEC.md` §9 classes a type error as Validation (Constraint is PK/UNIQUE/CHECK/
+  NOT NULL). Aligns the catalog's category with the spec and the query validator.
 - `pager`: the **free-list is now crash-safe**. It was mutated in place and
   flushed before the meta swap, so a crash between a commit's data sync and its
   meta swap left the recovered meta pointing at trunk pages the interrupted

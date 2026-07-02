@@ -260,6 +260,9 @@ impl CategorizedError for CatalogError {
             | CatalogError::UnknownColumn { .. }
             | CatalogError::DuplicateColumn { .. }
             | CatalogError::EngineManagedColumn { .. }
+            // A wrong-typed cell is a "type error", which `SPEC.md` §9 classes
+            // as Validation (not a Constraint like PK/UNIQUE/CHECK/NOT NULL).
+            | CatalogError::TypeMismatch { .. }
             | CatalogError::PkImmutable { .. } => ErrorCategory::Validation,
             CatalogError::UnknownTable { .. }
             | CatalogError::RowNotFound { .. }
@@ -267,7 +270,6 @@ impl CategorizedError for CatalogError {
             CatalogError::IndexExists { .. } => ErrorCategory::Validation,
             CatalogError::IndexOutOfSync { .. } => ErrorCategory::Corruption,
             CatalogError::NotNull { .. }
-            | CatalogError::TypeMismatch { .. }
             | CatalogError::DuplicateKey { .. }
             | CatalogError::UniqueViolation { .. }
             | CatalogError::CheckViolation { .. } => ErrorCategory::Constraint,
