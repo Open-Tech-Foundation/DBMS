@@ -20,6 +20,7 @@
 //! the trailing sort key is unique; append a unique column otherwise.
 
 use std::cmp::Ordering;
+use std::time::{Duration, Instant};
 
 use common::IoBackend;
 use proto::{Expr, JoinKind, Plan, Projection, SortKey};
@@ -35,8 +36,63 @@ type Row = Vec<Value>;
 type Result<T> = std::result::Result<T, ExecError>;
 type RowIter = Box<dyn Iterator<Item = Result<Row>>>;
 
+/// Per-query resource caps (`SPEC.md` §8, `ARCHITECTURE.md` §6). Breaching one
+/// is a clean [`ExecError::ResourceLimit`], never an OOM or a hang.
+///
+/// `max_rows` bounds the rows buffered at any materialization point — a sort,
+/// group, distinct, join inner side, or the final page — so an accidental cross
+/// join or an unbounded sort fails fast instead of exhausting memory.
+#[derive(Debug, Clone, Copy)]
+pub struct ResourceLimits {
+    /// Maximum rows a single operator may buffer / the query may materialize.
+    pub max_rows: u64,
+    /// Maximum number of join operators a plan may contain.
+    pub max_joins: u32,
+    /// Optional wall-clock execution deadline for one query.
+    pub deadline: Option<Duration>,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        ResourceLimits {
+            max_rows: 10_000_000,
+            max_joins: 16,
+            deadline: None,
+        }
+    }
+}
+
+/// A live budget derived from [`ResourceLimits`] for one execution: the row cap
+/// plus the resolved deadline instant.
+struct Budget {
+    max_rows: u64,
+    deadline: Option<Instant>,
+}
+
+impl Budget {
+    fn new(limits: &ResourceLimits) -> Self {
+        Budget {
+            max_rows: limits.max_rows,
+            deadline: limits.deadline.map(|d| Instant::now() + d),
+        }
+    }
+
+    /// Fail if the deadline has passed (checked periodically, not per row).
+    fn check_deadline(&self) -> Result<()> {
+        if let Some(end) = self.deadline {
+            if Instant::now() >= end {
+                return Err(ExecError::ResourceLimit {
+                    what: "execution deadline".to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 /// One page of results: the column shape, the page's rows, and a continuation
 /// token when more rows remain.
+#[derive(Debug)]
 pub struct Page {
     /// The output columns.
     pub shape: Shape,
@@ -53,8 +109,20 @@ struct Node {
 }
 
 /// Execute a physical plan and return one page, applying keyset pagination when
-/// the plan carries a top-level `Limit`/`Cursor`.
+/// the plan carries a top-level `Limit`/`Cursor`. Uses the default
+/// [`ResourceLimits`]; see [`execute_page_with`] to configure the caps.
 pub fn execute_page<B: IoBackend>(plan: &Plan, snap: &CatSnapshot<B>) -> Result<Page> {
+    execute_page_with(plan, snap, &ResourceLimits::default())
+}
+
+/// Execute a physical plan and return one page under the given resource caps.
+pub fn execute_page_with<B: IoBackend>(
+    plan: &Plan,
+    snap: &CatSnapshot<B>,
+    limits: &ResourceLimits,
+) -> Result<Page> {
+    check_join_count(plan, limits)?;
+    let budget = Budget::new(limits);
     // Peel the pagination wrappers. Either nesting order (`Cursor{Limit{..}}`
     // as lowered, or `Limit{Cursor{..}}`) means the same thing: resume, then
     // take a page.
@@ -87,9 +155,9 @@ pub fn execute_page<B: IoBackend>(plan: &Plan, snap: &CatSnapshot<B>) -> Result<
         _ => None,
     };
 
-    let node = build(core, snap)?;
+    let node = build(core, snap, &budget)?;
     let shape = node.shape.clone();
-    let mut rows = collect(node.iter)?;
+    let mut rows = collect(node.iter, &budget)?;
 
     // Resume: drop everything up to and including the cursor's position.
     if let Some(token) = resume {
@@ -128,12 +196,13 @@ pub fn execute_page<B: IoBackend>(plan: &Plan, snap: &CatSnapshot<B>) -> Result<
 /// Execute a plan and materialize every row (no pagination). Used by the
 /// equivalence tests against the reference executor.
 pub fn execute_stream<B: IoBackend>(plan: &Plan, snap: &CatSnapshot<B>) -> Result<Relation> {
-    let node = build(plan, snap)?;
-    drain(node)
+    let budget = Budget::new(&ResourceLimits::default());
+    let node = build(plan, snap, &budget)?;
+    drain(node, &budget)
 }
 
 /// Build the operator iterator for a plan.
-fn build<B: IoBackend>(plan: &Plan, snap: &CatSnapshot<B>) -> Result<Node> {
+fn build<B: IoBackend>(plan: &Plan, snap: &CatSnapshot<B>, budget: &Budget) -> Result<Node> {
     match plan {
         Plan::Scan { table, alias } => from_relation(scan(snap, table, alias.as_deref(), None)?),
         Plan::IndexScan {
@@ -143,7 +212,7 @@ fn build<B: IoBackend>(plan: &Plan, snap: &CatSnapshot<B>) -> Result<Node> {
             prefix,
         } => from_relation(scan(snap, table, alias.as_deref(), Some((index, prefix)))?),
         Plan::Filter { input, pred } => {
-            let child = build(input, snap)?;
+            let child = build(input, snap, budget)?;
             let shape = child.shape.clone();
             let pred = pred.clone();
             let probe = shape.clone();
@@ -160,25 +229,31 @@ fn build<B: IoBackend>(plan: &Plan, snap: &CatSnapshot<B>) -> Result<Node> {
                 iter: Box::new(iter),
             })
         }
-        Plan::Project { input, items } => project_stream(build(input, snap)?, items),
+        Plan::Project { input, items } => project_stream(build(input, snap, budget)?, items),
         Plan::Join {
             kind,
             left,
             right,
             on,
-        } => join_stream(*kind, build(left, snap)?, build(right, snap)?, on.clone()),
+        } => join_stream(
+            *kind,
+            build(left, snap, budget)?,
+            build(right, snap, budget)?,
+            on.clone(),
+            budget,
+        ),
         // Blocking operators: buffer the input, reuse the reference executor's
         // computation, then stream the result.
         Plan::Aggregate { input, by, aggs } => {
-            let rel = drain(build(input, snap)?)?;
+            let rel = drain(build(input, snap, budget)?, budget)?;
             from_relation(aggregate(&rel, by, aggs)?)
         }
         Plan::Sort { input, keys } => {
-            let rel = drain(build(input, snap)?)?;
+            let rel = drain(build(input, snap, budget)?, budget)?;
             from_relation(sort(rel, keys)?)
         }
         Plan::Distinct { input } => {
-            let rel = drain(build(input, snap)?)?;
+            let rel = drain(build(input, snap, budget)?, budget)?;
             from_relation(distinct(rel))
         }
         Plan::Limit {
@@ -187,7 +262,7 @@ fn build<B: IoBackend>(plan: &Plan, snap: &CatSnapshot<B>) -> Result<Node> {
             offset,
         } => {
             // A non-top (nested) limit streams with an early stop.
-            let child = build(input, snap)?;
+            let child = build(input, snap, budget)?;
             let skip = usize::try_from(*offset).unwrap_or(usize::MAX);
             let iter: RowIter = match limit {
                 Some(n) => {
@@ -232,11 +307,17 @@ fn project_stream(child: Node, items: &[Projection]) -> Result<Node> {
     })
 }
 
-fn join_stream(kind: JoinKind, left: Node, right: Node, on: Option<Expr>) -> Result<Node> {
+fn join_stream(
+    kind: JoinKind,
+    left: Node,
+    right: Node,
+    on: Option<Expr>,
+    budget: &Budget,
+) -> Result<Node> {
     let shape = left.shape.clone().concat(right.shape.clone());
     let right_width = right.shape.cols.len();
     // The inner side is scanned once per outer row, so it is buffered.
-    let right_rows: Vec<Row> = collect(right.iter)?;
+    let right_rows: Vec<Row> = collect(right.iter, budget)?;
     let probe = shape.clone();
     let iter = left.iter.flat_map(move |lrow| {
         let lrow = match lrow {
@@ -281,15 +362,57 @@ fn from_relation(rel: Relation) -> Result<Node> {
     })
 }
 
-fn drain(node: Node) -> Result<Relation> {
+fn drain(node: Node, budget: &Budget) -> Result<Relation> {
     Ok(Relation {
         shape: node.shape,
-        rows: collect(node.iter)?,
+        rows: collect(node.iter, budget)?,
     })
 }
 
-fn collect(iter: RowIter) -> Result<Vec<Row>> {
-    iter.collect()
+/// Materialize an operator's rows, enforcing the row cap and the deadline.
+/// This is the one choke point every buffering step (sort, group, distinct,
+/// join inner side, final page) flows through, so the caps hold everywhere.
+fn collect(iter: RowIter, budget: &Budget) -> Result<Vec<Row>> {
+    let mut out = Vec::new();
+    for (i, item) in iter.enumerate() {
+        if out.len() as u64 >= budget.max_rows {
+            return Err(ExecError::ResourceLimit {
+                what: format!("materialized more than {} rows", budget.max_rows),
+            });
+        }
+        // Poll the deadline periodically rather than on every row.
+        if i % 4096 == 0 {
+            budget.check_deadline()?;
+        }
+        out.push(item?);
+    }
+    Ok(out)
+}
+
+/// Reject a plan whose join count exceeds the cap, before executing it.
+fn check_join_count(plan: &Plan, limits: &ResourceLimits) -> Result<()> {
+    let joins = count_joins(plan);
+    if joins > limits.max_joins {
+        return Err(ExecError::ResourceLimit {
+            what: format!("plan uses {joins} joins (cap is {})", limits.max_joins),
+        });
+    }
+    Ok(())
+}
+
+/// The number of join operators anywhere in a plan tree.
+fn count_joins(plan: &Plan) -> u32 {
+    match plan {
+        Plan::Scan { .. } | Plan::IndexScan { .. } => 0,
+        Plan::Join { left, right, .. } => 1 + count_joins(left) + count_joins(right),
+        Plan::Filter { input, .. }
+        | Plan::Project { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::Sort { input, .. }
+        | Plan::Distinct { input }
+        | Plan::Limit { input, .. }
+        | Plan::Cursor { input, .. } => count_joins(input),
+    }
 }
 
 // --- keyset pagination helpers -----------------------------------------------

@@ -5,6 +5,33 @@ Per `PLAN.md` §1 rule 6, every resolution of an ambiguity or deviation from
 
 ---
 
+## D30 — Per-query resource caps are enforced at the streaming executor's materialization points
+
+**Phase:** 11 · **Status:** accepted
+
+`SPEC.md` §8 / `ARCHITECTURE.md` §6 / PLAN §4 call for per-query resource caps
+(rows, joins, sort/group memory, deadline → `ResourceLimit`), but only the wire
+decoder (`DecodeLimits`) was capped; the executor had no enforcement, so a cross
+join or an unbounded sort could buffer arbitrarily much memory.
+
+**Decision:** add a `ResourceLimits { max_rows, max_joins, deadline }` and a live
+`Budget` threaded through the pull-based executor. The key observation is that
+**every buffering step funnels through one `collect`** — the blocking operators
+(sort, aggregate, distinct) drain their input there, the nested-loop join buffers
+its inner side there, and `execute_page` materializes the final page there — so a
+single row cap enforced in `collect` bounds "materialized rows" *and*
+"sort/group memory" *and* a cross join's output at once. Join count is a cheap
+pre-execution plan walk; the deadline is polled in the same `collect` loop
+(against a monotonic `Instant`, not the injectable value-`Clock`, since it guards
+execution time, not row contents). The **reference executor stays uncapped** — it
+is the correctness oracle for equivalence tests, not a production path.
+`execute_query`/`execute_page` apply generous defaults (10M rows, 16 joins, no
+deadline); `execute_page_with` takes explicit limits. A cap on *concurrently
+open* cursors is a property of the cursor-owning API layer ([[D27]]), not the
+per-query executor, and is out of scope here.
+
+---
+
 ## D29 — A write transaction's working set is memory-bounded (no spill in v1)
 
 **Phase:** 11 · **Status:** accepted

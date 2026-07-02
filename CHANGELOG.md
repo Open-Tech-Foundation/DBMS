@@ -10,6 +10,14 @@ under a category (`Added` / `Changed` / `Fixed` / `Removed` / `Security`).
 
 ### Phase 11 — Hardening
 
+#### Added
+- `query`: **per-query resource caps** (`ResourceLimits`) enforced by the
+  streaming executor — a row cap at every materialization point (bounds sort,
+  group, distinct, join inner side, and the final page), a join-count cap, and
+  an optional wall-clock deadline; breaching one is a clean `ResourceLimit`
+  error. `execute_query`/`execute_page` apply generous defaults;
+  `execute_page_with` takes explicit limits (D30).
+
 #### Changed
 - CI: added a **loom** job that runs the registry's writer/reader model
   (`RUSTFLAGS=--cfg loom`) on every push/PR, so the concurrency proof can't

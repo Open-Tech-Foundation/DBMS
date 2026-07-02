@@ -9,9 +9,13 @@ use std::sync::Arc;
 use catalog::{Catalog, ColumnDef, IndexDef, TableDef};
 use common::{CategorizedError, ManualClock, MemoryBackend, Rng, SeededRng};
 use proto::{
-    AggFunc, CmpOp, Dir, Expr, JoinKind, JoinSpec, Projection, Select, SortKey, Stage, TableRef,
+    AggFunc, CmpOp, Dir, Expr, JoinKind, JoinSpec, Plan, Projection, Select, SortKey, Stage,
+    TableRef,
 };
-use query::{execute_page, execute_query, execute_reference, execute_stream, lower, plan};
+use query::{
+    execute_page, execute_page_with, execute_query, execute_reference, execute_stream, lower, plan,
+    ResourceLimits,
+};
 use types::{TypeKind, Value};
 
 fn clock_rng() -> (Arc<ManualClock>, Arc<SeededRng>) {
@@ -301,4 +305,78 @@ fn execute_page_reports_a_cursor_on_a_full_page() {
         page.cursor.is_some(),
         "a full first page should carry a cursor"
     );
+}
+
+// --- per-query resource caps (SPEC.md §8) ------------------------------------
+
+fn items_scan() -> Plan {
+    Plan::Scan {
+        table: "items".into(),
+        alias: None,
+    }
+}
+
+fn items_cross_join() -> Plan {
+    Plan::Join {
+        kind: JoinKind::Inner,
+        left: Box::new(items_scan()),
+        right: Box::new(items_scan()),
+        on: None,
+    }
+}
+
+#[test]
+fn the_row_cap_stops_an_oversized_sort() {
+    // A sort must buffer all 25 rows; a 10-row cap trips before it finishes.
+    let cat = paging_db();
+    let plan = Plan::Sort {
+        input: Box::new(items_scan()),
+        keys: vec![SortKey {
+            expr: col("id"),
+            dir: Dir::Asc,
+        }],
+    };
+    let limits = ResourceLimits {
+        max_rows: 10,
+        ..ResourceLimits::default()
+    };
+    let err = execute_page_with(&plan, &cat.snapshot(), &limits).unwrap_err();
+    assert_eq!(err.category(), common::ErrorCategory::ResourceLimit);
+    // The default cap comfortably admits the same query.
+    execute_page(&plan, &cat.snapshot()).unwrap();
+}
+
+#[test]
+fn the_row_cap_bounds_a_cross_join() {
+    // 25 × 25 = 625 output rows; a 100-row cap trips as they are collected,
+    // so an accidental cross join can't exhaust memory.
+    let cat = paging_db();
+    let limits = ResourceLimits {
+        max_rows: 100,
+        ..ResourceLimits::default()
+    };
+    let err = execute_page_with(&items_cross_join(), &cat.snapshot(), &limits).unwrap_err();
+    assert_eq!(err.category(), common::ErrorCategory::ResourceLimit);
+}
+
+#[test]
+fn the_join_cap_rejects_too_many_joins() {
+    let cat = paging_db();
+    let limits = ResourceLimits {
+        max_joins: 0,
+        ..ResourceLimits::default()
+    };
+    let err = execute_page_with(&items_cross_join(), &cat.snapshot(), &limits).unwrap_err();
+    assert_eq!(err.category(), common::ErrorCategory::ResourceLimit);
+}
+
+#[test]
+fn the_deadline_cap_trips_on_a_zero_budget() {
+    let cat = paging_db();
+    let limits = ResourceLimits {
+        deadline: Some(std::time::Duration::ZERO),
+        ..ResourceLimits::default()
+    };
+    let err = execute_page_with(&items_scan(), &cat.snapshot(), &limits).unwrap_err();
+    assert_eq!(err.category(), common::ErrorCategory::ResourceLimit);
 }

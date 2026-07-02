@@ -48,6 +48,13 @@ pub enum ExecError {
     /// A cursor token that is malformed, tampered, or used without an order.
     #[error("malformed or unusable cursor token")]
     BadCursor,
+    /// A per-query resource cap was exceeded (`SPEC.md` §8): too many
+    /// materialized rows, too many joins, or the execution deadline.
+    #[error("query resource limit exceeded: {what}")]
+    ResourceLimit {
+        /// Which cap was hit, described for the caller.
+        what: String,
+    },
     /// A plan node the executor does not run yet.
     #[error("the executor does not support {feature} yet")]
     Unsupported {
@@ -65,6 +72,7 @@ impl common::CategorizedError for ExecError {
             ExecError::BadCursor | ExecError::Unsupported { .. } => {
                 common::ErrorCategory::Validation
             }
+            ExecError::ResourceLimit { .. } => common::ErrorCategory::ResourceLimit,
         }
     }
 }

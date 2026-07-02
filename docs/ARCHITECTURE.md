@@ -189,8 +189,12 @@ result (`applied`/`affected`).
 - **Decoder hardening:** `proto` decoding enforces max nesting depth, max node count, and max
   message size *before* allocating, and uses an explicit stack / depth counter (no unbounded
   recursion). Continuously fuzzed.
-- **Resource limits:** the executor honors configurable caps (materialized rows, join count,
-  sort/group memory, open cursors, deadline); breaching a cap is a clean `ResourceLimit` error.
+- **Resource limits:** the streaming executor honors configurable `ResourceLimits` — a cap on the
+  rows buffered at any materialization point (which bounds a sort, group, distinct, join inner side,
+  and the final page in one place), a cap on the number of joins in a plan, and an optional
+  wall-clock deadline. Breaching one is a clean `ResourceLimit` error, never an OOM or a hang. (A
+  cap on the number of *concurrently open* cursors belongs to the cursor-owning API layer, not the
+  per-query executor.)
 - **Checked arithmetic** everywhere a `Value` is computed; overflow → typed error.
 - **`unsafe` policy:** minimized; every block carries a `// SAFETY:` rationale; Miri runs over
   `unsafe`-bearing crates; data races are excluded by construction (single writer + Rust ownership),

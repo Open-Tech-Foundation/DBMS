@@ -26,7 +26,7 @@ pub use eval::{eval, eval_predicate, BoundColumn, EvalError, Shape};
 pub use exec::{execute as execute_reference, ExecError, Relation};
 pub use lower::{lower, LowerError};
 pub use plan::{explain, plan, render_plan};
-pub use stream::{execute_page, execute_stream, Page};
+pub use stream::{execute_page, execute_page_with, execute_stream, Page, ResourceLimits};
 pub use validate::{
     validate, validate_select, OutputColumn, OutputSchema, SchemaView, ValidateError, Validated,
 };
