@@ -29,8 +29,10 @@ full relational feature set and 20+ years of hardening today.
 
 ## Track 2 — Rust release engineering
 
-- [ ] Fix MSRV: `rust-version = "1.95"` is not a real release — set the true
-      minimum and add a `cargo +<msrv>` CI job so it can't rot.
+- [ ] MSRV policy: `rust-version = "1.95"` is the current stable and builds
+      clean, but it pins the floor to the newest release. Decide whether to lower
+      it to the true minimum (broadens compatibility) and add a `cargo +<msrv>`
+      CI job so it can't rot.
 - [ ] Decide the **publish surface**. crates.io requires every dependency to be
       published, so shipping `otf-dbms` means publishing all internal crates
       (or collapsing them). Recommendation: publish `otf-dbms` (public API) +
