@@ -32,7 +32,10 @@ full relational feature set and 20+ years of hardening today.
       target remains a possible future upgrade.
 - [x] All `PLAN.md` §7 acceptance scenarios green **in CI** (acceptance.rs +
       api.rs, run in the `check` job on every push).
-- [ ] Extend crash/power-loss injection over the free-list rebuild path.
+- [x] Extend crash/power-loss injection over the free-list rebuild path
+      (`pager_crash.rs`: a fault swept across every write and both fsyncs of a
+      multi-trunk rebuild commit recovers whole — prior free-list intact or new
+      state fully applied).
 - [x] Measure and record binary size (see `docs/BENCHMARKS.md` § Binary size).
 
 ## Track 2 — Rust release engineering
