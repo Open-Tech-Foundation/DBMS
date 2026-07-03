@@ -56,7 +56,7 @@ The MessagePack wire protocol is the enabling asset: the FFI boundary is
       users need no Rust toolchain.
 - [ ] **WASM** via wasm-bindgen for browsers, Deno, Bun, edge (Workers). Memory
       first; then **OPFS**-backed persistence (async API).
-- [ ] **`@opentf/edb` TS wrapper**: a typed AST builder emitting the same
+- [ ] **`@open-tech-foundation/edb` TS wrapper**: a typed AST builder emitting the same
       `Request` shape (PLAN §8.5) + typed `Row`/`Response` accessors, `.d.ts`
       shipped. Single async surface shared by native and WASM backends.
 - [ ] CI matrix builds/tests both targets; publish on tag.
@@ -70,7 +70,7 @@ The MessagePack wire protocol is the enabling asset: the FFI boundary is
 ## Milestones
 
 - **0.1.0** — Tracks 1+2: shippable, honest embedded engine on crates.io.
-- **0.2.0** — Track 3 (Node native): `@opentf/edb` on npm.
+- **0.2.0** — Track 3 (Node native): `@open-tech-foundation/edb` on npm.
 - **0.3.0** — Track 3 (WASM/OPFS): browser + edge story.
 - Track 4 runs continuously.
 

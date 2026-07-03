@@ -8,7 +8,7 @@ edition = "2021"
 rust-version = "1.95"
 license = "Apache-2.0"
 authors = ["Open Tech Foundation and its contributors"]
-repository = "https://github.com/opentf/edb"
+repository = "https://github.com/Open-Tech-Foundation/edb"
 publish = false
 
 [workspace.dependencies]

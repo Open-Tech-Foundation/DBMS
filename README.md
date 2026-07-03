@@ -1,7 +1,10 @@
+<div align="center">
+
 # OTF EDB
 
-An embedded, single-file relational database written in Rust, with a
-structured (non-SQL) binary query interface.
+</div>
+
+> An embedded, single-file relational database written in Rust, with a structured (non-SQL) binary query interface.
 
 - **ACID, crash-safe storage.** A copy-on-write B+tree over a paged,
   checksummed file with a double-buffered meta page: every commit is atomic and
