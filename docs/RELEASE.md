@@ -9,9 +9,12 @@ the Rust and JavaScript ecosystems.
 v1 is a deliberately **narrow** embedded engine: a memory-safe, copy-on-write
 relational core with a **structured binary query protocol** (typed AST /
 MessagePack), MVCC snapshot isolation, and built-in resource limits. It is
-**not** a SQLite feature replacement. No SQL text front-end, foreign keys,
-encryption, or network host in v1 (see `SPEC.md` §11, `PLAN.md` §8). Release
-messaging must say this plainly so scope gaps aren't filed as bugs.
+**not** a SQLite feature replacement. The **structured binary protocol is the
+product, not a stepping stone**: there is deliberately no SQL text front-end —
+not in v1, not later — so there is no parser and no SQL-injection surface.
+Encryption at rest and a network host stay out of v1 (see `SPEC.md` §11,
+`PLAN.md` §8). Release messaging must say this plainly so scope gaps aren't
+filed as bugs.
 
 Choose OTF for a small, safe, embeddable engine with a binary protocol and no
 SQL-injection surface, sharing one AST across Rust and JS. Choose SQLite for the
@@ -56,7 +59,7 @@ The MessagePack wire protocol is the enabling asset: the FFI boundary is
       users need no Rust toolchain.
 - [ ] **WASM** via wasm-bindgen for browsers, Deno, Bun, edge (Workers). Memory
       first; then **OPFS**-backed persistence (async API).
-- [ ] **`@open-tech-foundation/edb` TS wrapper**: a typed AST builder emitting the same
+- [ ] **`@opentf/edb` TS wrapper**: a typed AST builder emitting the same
       `Request` shape (PLAN §8.5) + typed `Row`/`Response` accessors, `.d.ts`
       shipped. Single async surface shared by native and WASM backends.
 - [ ] CI matrix builds/tests both targets; publish on tag.
@@ -70,7 +73,7 @@ The MessagePack wire protocol is the enabling asset: the FFI boundary is
 ## Milestones
 
 - **0.1.0** — Tracks 1+2: shippable, honest embedded engine on crates.io.
-- **0.2.0** — Track 3 (Node native): `@open-tech-foundation/edb` on npm.
+- **0.2.0** — Track 3 (Node native): `@opentf/edb` on npm.
 - **0.3.0** — Track 3 (WASM/OPFS): browser + edge story.
 - Track 4 runs continuously.
 
