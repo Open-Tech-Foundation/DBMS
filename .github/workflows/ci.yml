@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  schedule:
+    # Nightly at 03:17 UTC — drives the extended fuzz soak below.
+    - cron: '17 3 * * *'
 
 env:
   CARGO_TERM_COLOR: always
@@ -63,6 +66,25 @@ jobs:
         with:
           name: bench-results
           path: bench-results.txt
+
+  # The proto decoder fuzzers (crates/proto/tests/proto_fuzz.rs) run a fixed,
+  # deterministic budget in the `check` job on every push. This job re-runs them
+  # on a much larger budget with a run-derived seed, on a nightly schedule (or
+  # on demand), so a sustained soak explores fresh inputs while staying
+  # reproducible from the printed seed.
+  fuzz:
+    name: fuzz soak (scheduled)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: extended proto fuzz soak
+        run: cargo test -p proto --test proto_fuzz --release --locked -- --nocapture
+        env:
+          FUZZ_ITERS: '5000000'
+          FUZZ_SEED: ${{ github.run_id }}
 
   supply-chain:
     name: audit · deny

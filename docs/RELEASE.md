@@ -22,13 +22,18 @@ full relational feature set and 20+ years of hardening today.
 
 ## Track 1 — Finish hardening (close Phase 11)
 
-- [ ] Criterion benches with a **committed baseline**: point-get, range scan,
-      bulk insert, mixed read/write under a concurrent writer. Required before
-      any published performance comparison.
-- [ ] Promote `proto_fuzz` to a **nightly cargo-fuzz** job (not just unit cases).
-- [ ] All `PLAN.md` §7 acceptance scenarios green **in CI**.
+- [x] Criterion benches with a **committed baseline**: point-get, index seek,
+      full scan, bulk insert, join+group. Baseline in `docs/BENCHMARKS.md`,
+      bench-on-demand CI job. (Mixed read/write under a concurrent writer is a
+      future file-backed throughput bench.)
+- [x] Fuzzers **scheduled**: `proto_fuzz` runs a fixed deterministic budget on
+      every push and an extended, run-seeded soak nightly (`FUZZ_ITERS` /
+      `FUZZ_SEED`, `fuzz soak` CI job). A libfuzzer/cargo-fuzz coverage-guided
+      target remains a possible future upgrade.
+- [x] All `PLAN.md` §7 acceptance scenarios green **in CI** (acceptance.rs +
+      api.rs, run in the `check` job on every push).
 - [ ] Extend crash/power-loss injection over the free-list rebuild path.
-- [ ] Measure and record binary size (workspace + published crate).
+- [x] Measure and record binary size (see `docs/BENCHMARKS.md` § Binary size).
 
 ## Track 2 — Rust release engineering
 

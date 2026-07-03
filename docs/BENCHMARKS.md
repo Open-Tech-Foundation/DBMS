@@ -69,3 +69,20 @@ below). The scan they replace is O(rows), so the speedup grows with table size.
   overhead. On this in-memory backend it isolates the CoW + meta-swap cost; a
   file backend would add fsync latency per commit (a future file-backed
   throughput bench).
+
+## Binary size
+
+Measured on `x86_64-unknown-linux-gnu`, rustc 1.95.0, `--release`
+(as of 2026-07-03; no `panic=abort`, LTO, or `opt-level="z"` yet):
+
+| Artifact | Unstripped | Stripped |
+|---|---|---|
+| `otf-edb` CLI (`crates/cli`, statically linked engine) | 1.67 MiB (1,747,736 B) | 1.34 MiB (1,407,192 B) |
+| `otf-edb` library rlib (`crates/edb`, the published crate) | 1.08 MiB (1,134,938 B) | — |
+
+The rlib is pre-link (includes metadata the linker drops); the CLI figure is
+the shippable single-file artifact. Reproduce with
+`cargo build --release -p cli` then `ls -l target/release/otf-edb` (and
+`strip` a copy). Size-reduction knobs (`panic=abort`, thin LTO,
+`opt-level="z"`, `strip=true` in the release profile) are deferred until there
+is a release-profile pass — recorded here as the pre-optimization baseline.

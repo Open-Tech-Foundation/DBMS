@@ -10,6 +10,25 @@ use proto::{decode_doc, decode_request, encode_request, DecodeLimits, Request};
 const RANDOM_INPUTS: u64 = 100_000;
 const MUTATED_INPUTS: u64 = 100_000;
 
+/// Iteration budget for a fuzz loop. Defaults to the on-push count; the
+/// scheduled CI job sets `FUZZ_ITERS` to crank it up for a longer soak.
+fn iters(default: u64) -> u64 {
+    match std::env::var("FUZZ_ITERS") {
+        Ok(s) => s.parse().unwrap_or(default),
+        Err(_) => default,
+    }
+}
+
+/// Seed for a fuzz loop. Deterministic by default (D4: a failure reproduces
+/// from the printed seed); the scheduled job sets `FUZZ_SEED` (e.g. the CI run
+/// id) so each soak explores fresh inputs while staying reproducible.
+fn seed(base: u64) -> u64 {
+    match std::env::var("FUZZ_SEED") {
+        Ok(s) => s.parse::<u64>().map(|v| v ^ base).unwrap_or(base),
+        Err(_) => base,
+    }
+}
+
 /// A small corpus of valid wire messages to mutate (taken from the
 /// round-trip suite's territory: both surfaces, DML, a transaction).
 fn corpus() -> Vec<Vec<u8>> {
@@ -89,14 +108,14 @@ fn probe(bytes: &[u8], limits: &DecodeLimits, what: &str) {
 
 #[test]
 fn random_bytes_never_panic_the_decoder() {
-    let rng = SeededRng::new(0xF0221E5);
+    let rng = SeededRng::new(seed(0xF0221E5));
     let limits = DecodeLimits::default();
     let tight = DecodeLimits {
         max_bytes: 256,
         max_depth: 8,
         max_nodes: 64,
     };
-    for i in 0..RANDOM_INPUTS {
+    for i in 0..iters(RANDOM_INPUTS) {
         let len = (rng.next_u64() % 96) as usize;
         let mut bytes = Vec::with_capacity(len);
         for _ in 0..len {
@@ -111,10 +130,10 @@ fn random_bytes_never_panic_the_decoder() {
 
 #[test]
 fn mutated_valid_messages_never_panic_the_decoder() {
-    let rng = SeededRng::new(0xBADC_0FFE);
+    let rng = SeededRng::new(seed(0xBADC_0FFE));
     let limits = DecodeLimits::default();
     let corpus = corpus();
-    for i in 0..MUTATED_INPUTS {
+    for i in 0..iters(MUTATED_INPUTS) {
         let base = &corpus[(rng.next_u64() as usize) % corpus.len()];
         let mut bytes = base.clone();
         match rng.next_u64() % 4 {
