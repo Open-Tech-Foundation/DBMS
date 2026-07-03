@@ -267,9 +267,9 @@ Each is its own later, phased effort; build only when explicitly requested. Keep
 1. **Query power:** hash & merge joins, RIGHT/FULL joins, UNION/INTERSECT/EXCEPT, subqueries, CTEs,
    window functions, UPSERT/MERGE, CASE, string/numeric/date functions, LIKE on non-anchored
    patterns with specialized indexing.
-2. **Schema power:** foreign keys, generated columns, ALTER beyond add-column, partial & expression
+2. **Schema power:** generated columns, ALTER beyond add-column, partial & expression
    indexes, JSON path queries + JSON-path indexes, decimal/money type, savepoints, views, sequences,
-   collations.
+   collations. (Foreign keys were pulled forward into v1 — see `SPEC.md` §4.1.)
 3. **Storage:** compaction/vacuum; cost-based optimizer.
 4. **Deployment:** the network (D1-style) host wrapping `core` behind an RPC front-end using the same
    MessagePack protocol; then authentication/authorization, at-rest encryption, and
