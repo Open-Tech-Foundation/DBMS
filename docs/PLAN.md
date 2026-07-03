@@ -101,11 +101,10 @@ Implement the `SPEC.md` §8 / `ARCHITECTURE.md` §6 mechanisms as concrete, test
    `\timing`. Primary manual playground.
 2. **Scenario runner:** execute a scripted query sequence from a file; snapshot results for
    reproducible demos and golden-file regression tests.
-3. **Concurrency playground:** spawn configurable readers + writers running a scenario (e.g. the
-   bank scenario, §7.5) and assert the end-state invariant; used interactively and in CI stress runs.
-4. **Fuzz harness:** cargo-fuzz targets for the AST decoder, page decoder, and B+tree op streams.
-5. **Bench harness:** the criterion suite (§3.8) with a compare-to-previous script.
-6. **Inspector / integrity-check:** dump file structure (meta, freelist, per-tree page counts, tree
+3. **Fuzz harness:** seeded, deterministic fuzzers for the AST decoder and page decoder — run in the
+   test suite on every push and on an extended budget on a schedule.
+4. **Bench harness:** the criterion suite (§3.8) with a compare-to-previous script.
+5. **Inspector / integrity-check:** dump file structure (meta, freelist, per-tree page counts, tree
    depth) and run `validate()` on a file.
 
 ---
@@ -221,10 +220,10 @@ Each phase: **Objective → Deliverables → Strategy → Exit criteria.**
 
 ### Phase 11 — Playgrounds, hardening & benchmarking
 - **Objective:** make the engine demonstrable, stress-proven, and measured.
-- **Deliverables:** the REPL, scenario runner, concurrency playground, fuzz harness, and criterion
-  benches from §5; documented demo scenarios (incl. §7); a README quick-start.
-- **Strategy:** wire playgrounds into CI — fuzzers scheduled, concurrency stress + acceptance
-  scenarios on every push, benches on demand with comparison.
+- **Deliverables:** the REPL, scenario runner, fuzz harness, and criterion benches from §5;
+  documented demo scenarios (incl. §7); a README quick-start.
+- **Strategy:** wire playgrounds into CI — fuzzers scheduled (extended budget) and run on every push,
+  acceptance scenarios on every push, benches on demand with comparison.
 - **Exit:** all §7 scenarios pass; fuzzers clean over a sustained session; a baseline bench report
   is committed.
 
